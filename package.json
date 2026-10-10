@@ -1,0 +1,28 @@
+{
+  "name": "stac-viewer",
+  "version": "1.0.0",
+  "description": "Static viewer for Canadian LiDAR (CanElevation COPC), HRDEM and Sentinel-2 STAC, hosted on GitHub Pages",
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "index": "node scripts/build-lidar-index.mjs"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "geotiff": "^3.0.5",
+    "hyparquet": "^1.31.3",
+    "maplibre-gl": "^4.7.1",
+    "proj4": "^2.15.0"
+  },
+  "devDependencies": {
+    "@types/geojson": "^7946.0.16",
+    "@types/node": "^22.20.5",
+    "@types/proj4": "^2.5.6",
+    "hyparquet-writer": "^0.16.11",
+    "typescript": "5.9",
+    "vite": "^6.4.4"
+  },
+  "type": "module"
+}

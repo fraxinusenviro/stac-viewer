@@ -1,0 +1,72 @@
+:root {
+  --bg: #ffffff;
+  --panel: #f7f6f3;
+  --text: #1d1f21;
+  --muted: #5f6368;
+  --line: #dcd9d2;
+  --accent: #2b6e4f;
+  --accent-text: #ffffff;
+  --error: #b3261e;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17191b; --panel: #1f2225; --text: #e8eaed; --muted: #a0a6ad;
+    --line: #34383c; --accent: #5fb98d; --accent-text: #0d1f16; --error: #f2b8b5;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+#app { display: grid; grid-template-columns: 360px 1fr; height: 100dvh; }
+#side { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border-right: 1px solid var(--line); }
+#map { min-height: 0; }
+header { padding: 14px 16px 6px; }
+h1 { font-size: 18px; margin: 0 0 2px; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.tabs { display: flex; gap: 4px; padding: 6px 12px; border-bottom: 1px solid var(--line); }
+.tab { flex: 1; min-height: 40px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font: inherit; font-weight: 600; cursor: pointer; }
+.tab[aria-selected="true"] { background: var(--bg); color: var(--text); box-shadow: 0 0 0 1px var(--line); }
+.pane { flex: 1; overflow-y: auto; padding: 8px 16px 16px; min-height: 0; }
+.pane p { margin: 6px 0; }
+.stats { font-variant-numeric: tabular-nums; color: var(--muted); }
+.list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.card { display: flex; gap: 10px; align-items: flex-start; text-align: left; width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: inherit; font: inherit; cursor: pointer; }
+.card.static { cursor: default; }
+.card:hover { border-color: var(--muted); }
+.card.on { box-shadow: 0 0 0 2px var(--accent); }
+.card-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.card-body .muted { font-size: 12px; }
+.swatch { width: 12px; height: 12px; border-radius: 3px; margin-top: 3px; flex: none; background: var(--c); }
+.scene img, .thumb-missing { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; flex: none; background: var(--line); }
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.controls { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.controls input[type=number] { width: 72px; }
+.form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0; }
+.form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.form label.row { grid-column: 1 / -1; flex-direction: row; }
+.form input[type=range] { flex: 1; }
+input, select { font: inherit; font-size: 14px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+.btn { min-height: 36px; padding: 0 14px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-text); font: inherit; font-weight: 600; cursor: pointer; }
+.btn.ghost { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+.btn.wide { width: 100%; min-height: 44px; }
+footer { padding: 10px 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+footer p { margin: 0; }
+#status:empty { display: none; }
+#status[data-kind="error"] { color: var(--error); }
+a { color: var(--accent); }
+.popup { font: 13px system-ui, sans-serif; color: #1d1f21; }
+.popup table { border-collapse: collapse; margin: 6px 0; }
+.popup th { text-align: left; font-weight: 500; color: #5f6368; padding: 2px 10px 2px 0; }
+.popup .links { display: flex; gap: 12px; }
+.popup a { color: #2b6e4f; font-weight: 600; }
+
+@media (max-width: 760px) {
+  #app { grid-template-columns: 1fr; grid-template-rows: 52dvh 1fr; }
+  #side { order: 2; border-right: 0; border-top: 1px solid var(--line); }
+  #map { order: 1; }
+  header p { display: none; }
+  input, select { font-size: 16px; }
+}

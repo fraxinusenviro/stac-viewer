@@ -1,0 +1,45 @@
+{
+ "generated": "2026-10-10",
+ "projects": [
+  {
+   "id": "HC/Halifax_County_Inland_2018",
+   "label": "Halifax County Inland 2018",
+   "jurisdiction": "Nova Scotia",
+   "year": 2018,
+   "crs": "EPSG:2961",
+   "verticalDatum": "CGVD2013",
+   "provider": "Natural Resources Canada — CanElevation Series, LiDAR Point Clouds (COPC)",
+   "licence": "Open Government Licence – Canada",
+   "urlTemplate": "https://canelevation-lidar-point-clouds.s3.ca-central-1.amazonaws.com/pointclouds_nuagespoints/HC/Halifax_County_Inland_2018/{name}_2018_PointCloud_CGVD2013.copc.laz",
+   "tiles": 6351,
+   "points": 87827692793,
+   "bytes": 548048598552,
+   "bbox": [
+    -64.244042,
+    44.432243,
+    -62.155943,
+    45.280015
+   ]
+  },
+  {
+   "id": "HC/Halifax_County_Coastal_2018",
+   "label": "Halifax County Coastal 2018",
+   "jurisdiction": "Nova Scotia",
+   "year": 2018,
+   "crs": "EPSG:2961",
+   "verticalDatum": "CGVD2013",
+   "provider": "Natural Resources Canada — CanElevation Series, LiDAR Point Clouds (COPC)",
+   "licence": "Open Government Licence – Canada",
+   "urlTemplate": "https://canelevation-lidar-point-clouds.s3.ca-central-1.amazonaws.com/pointclouds_nuagespoints/HC/Halifax_County_Coastal_2018/{name}_2018_PointCloud_CGVD2013.copc.laz",
+   "tiles": 2465,
+   "points": 50686183115,
+   "bytes": 517177354986,
+   "bbox": [
+    -64.068662,
+    44.404882,
+    -62.054283,
+    44.990355
+   ]
+  }
+ ]
+}

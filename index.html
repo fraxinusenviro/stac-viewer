@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>STAC Viewer</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%232b6e4f%22/%3E%3Cpath d=%22M4 24l8-10 6 7 4-4 6 7z%22 fill=%22%23fff%22/%3E%3C/svg%3E">
+  <meta name="description" content="LiDAR point-cloud coverage, HRDEM elevation and Sentinel-2 imagery for Canada, searched and drawn in the browser.">
+</head>
+<body>
+  <div id="app">
+    <aside id="side">
+      <header>
+        <h1>STAC Viewer</h1>
+        <p class="muted small">LiDAR, elevation and imagery, straight from public cloud storage.</p>
+      </header>
+      <nav class="tabs" role="tablist">
+        <button class="tab" role="tab" data-tab="lidar" aria-selected="true">LiDAR</button>
+        <button class="tab" role="tab" data-tab="elev" aria-selected="false">Elevation</button>
+        <button class="tab" role="tab" data-tab="img" aria-selected="false">Imagery</button>
+      </nav>
+
+      <section class="pane" id="pane-lidar">
+        <p class="muted small">NRCan CanElevation point clouds (COPC). The list follows the map.</p>
+        <p id="lidar-stats" class="stats small"></p>
+        <div id="lidar-list" class="list"></div>
+      </section>
+
+      <section class="pane" id="pane-elev" hidden>
+        <p class="muted small">NRCan HRDEM 1 m DTM and DSM, per LiDAR project and as national mosaics.</p>
+        <button id="elev-search" class="btn wide">Search this view</button>
+        <div id="elev-list" class="list"></div>
+      </section>
+
+      <section class="pane" id="pane-img" hidden>
+        <p class="muted small">Sentinel-2 Level-2A true colour, from Element 84 Earth Search.</p>
+        <div class="form">
+          <label>From <input id="img-from" type="date"></label>
+          <label>To <input id="img-to" type="date"></label>
+          <label class="row">Max cloud <input id="img-cloud" type="range" min="0" max="100" step="5" value="30"> <output id="img-cloud-out">30%</output></label>
+          <label class="row">Opacity <input id="img-opacity" type="range" min="0" max="1" step="0.05" value="1"></label>
+        </div>
+        <button id="img-search" class="btn wide">Search this view</button>
+        <div id="img-list" class="list"></div>
+      </section>
+
+      <footer>
+        <p id="status" class="small" role="status" aria-live="polite"></p>
+        <label class="row small">Basemap
+          <select id="basemap"><option value="light">Light</option><option value="imagery">Imagery</option></select>
+        </label>
+        <p class="muted small">Data: NRCan (Open Government Licence – Canada), ESA Copernicus via Element 84. <a href="https://github.com/fraxinusenviro/stac-viewer">Source</a></p>
+      </footer>
+    </aside>
+    <main id="map"></main>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
