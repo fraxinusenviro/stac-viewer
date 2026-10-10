@@ -41,9 +41,13 @@ h1 { font-size: 18px; margin: 0 0 2px; }
 .card-body .muted { font-size: 12px; }
 .swatch { width: 12px; height: 12px; border-radius: 3px; margin-top: 3px; flex: none; background: var(--c); }
 .scene img, .thumb-missing { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; flex: none; background: var(--line); }
+.pane h2 { font-size: 13px; text-transform: none; margin: 4px 0 0; color: var(--muted); font-weight: 600; }
+.card.on-map { border-color: var(--accent); }
+.row.spread { justify-content: space-between; flex-wrap: nowrap; }
+.btn.small-btn { min-height: 32px; padding: 0 10px; font-size: 13px; }
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .controls { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
-.controls input[type=number] { width: 72px; }
+.controls input[type=number], .on-map input[type=number] { width: 76px; }
 .form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0; }
 .form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .form label.row { grid-column: 1 / -1; flex-direction: row; }

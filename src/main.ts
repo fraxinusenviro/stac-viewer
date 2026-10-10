@@ -1,4 +1,4 @@
-// STAC Viewer — LiDAR point-cloud coverage, HRDEM elevation and Sentinel-2
+// STAC Viewer — LiDAR point clouds, LiDAR-derived rasters (HRDEM) and Sentinel-2
 // imagery, searched and drawn entirely in the browser. Static files on GitHub
 // Pages; every byte of data comes straight from public object storage.
 
@@ -6,7 +6,8 @@ import maplibregl, { type GeoJSONSource, type LngLatBoundsLike, type Map as MlMa
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './styles.css';
 import { LidarIndex, type LidarTile, type LonLatBox } from './lidarIndex.ts';
-import { closeCog, openCog, registerCogProtocol, setCogStyle, type CogMode } from './cog.ts';
+import { closeCog, openCog, registerCogProtocol, sampleRange, setCogStyle } from './cog.ts';
+import { productById, productsFor, usesRange, type RasterProduct } from './products.ts';
 import { coverageTouches, fetchExtent, searchHrdem, searchS2, type HrdemItem, type S2Item } from './stac.ts';
 import { h, clear, fmtBytes, fmtCount, fmtDate } from './dom.ts';
 
@@ -92,7 +93,7 @@ map.on('load', async () => {
     const pj = await (await fetch(DATA + 'lidar-projects.json')).json();
     projects = pj.projects;
     projects.forEach(p => projectById.set(p.id, p));
-  } catch (e) { say(`The LiDAR project list could not be read: ${(e as Error).message}`, 'error'); }
+  } catch (e) { say(`The point-cloud project list could not be read: ${(e as Error).message}`, 'error'); }
 
   wireLidar();
   scheduleLidarSearch();
@@ -106,12 +107,17 @@ function say(msg: string, kind: 'info' | 'error' = 'info') {
   statusEl.dataset.kind = kind;
 }
 
-let activeTab = 'lidar';
+let activeTab = 'pc';
 document.querySelectorAll<HTMLButtonElement>('.tab').forEach(btn => btn.addEventListener('click', () => {
   activeTab = btn.dataset.tab!;
   document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-selected', String(b === btn)));
   document.querySelectorAll<HTMLElement>('.pane').forEach(p => { p.hidden = p.id !== `pane-${activeTab}`; });
-  if (activeTab === 'lidar') scheduleLidarSearch();
+  // The point-cloud footprints belong to their tab: over a raster or a scene
+  // they are a grid of lines on top of the thing being looked at.
+  for (const id of ['coverage-fill', 'coverage-line', 'tiles-fill', 'tiles-line']) {
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', activeTab === 'pc' ? 'visible' : 'none');
+  }
+  if (activeTab === 'pc') scheduleLidarSearch();
 }));
 
 document.getElementById('basemap')!.addEventListener('change', (e) => {
@@ -119,7 +125,7 @@ document.getElementById('basemap')!.addEventListener('change', (e) => {
   for (const k of Object.keys(BASEMAPS)) map.setLayoutProperty(`bm-${k}`, 'visibility', k === v ? 'visible' : 'none');
 });
 
-// ── LiDAR ───────────────────────────────────────────────────────────────────
+// ── Point clouds (CanElevation COPC) ────────────────────────────────────────
 
 const lidarList = document.getElementById('lidar-list')!;
 const lidarStats = document.getElementById('lidar-stats')!;
@@ -134,7 +140,7 @@ function scheduleLidarSearch() {
 }
 
 async function runLidarSearch() {
-  if (activeTab !== 'lidar' || !map.isStyleLoaded()) return;
+  if (activeTab !== 'pc' || !map.isStyleLoaded()) return;
   const seq = ++lidarSeq;
   const vb = viewBox();
   if (map.getZoom() < TILE_MIN_ZOOM) {
@@ -157,7 +163,7 @@ async function runLidarSearch() {
     lidarStats.textContent = `${fmtCount(tiles.length)} tiles · read ${stats.groupsRead} of ${stats.groupsTotal} row groups, ${fmtBytes(stats.bytesRead)} in ${stats.requests} request${stats.requests === 1 ? '' : 's'}, ${(stats.ms / 1000).toFixed(2)} s`;
     renderTileList(tiles);
   } catch (e) {
-    if (seq === lidarSeq) say(`LiDAR search failed: ${(e as Error).message}`, 'error');
+    if (seq === lidarSeq) say(`Point-cloud search failed: ${(e as Error).message}`, 'error');
   }
 }
 
@@ -166,7 +172,7 @@ function renderProjectsOverview(vb: LonLatBox) {
   const here = projects.filter(p => p.bbox[0] <= vb[2] && p.bbox[2] >= vb[0] && p.bbox[1] <= vb[3] && p.bbox[3] >= vb[1]);
   lidarStats.textContent = `Zoom in past level ${TILE_MIN_ZOOM} to list individual tiles.`;
   if (!here.length) {
-    lidarList.append(h('p', { class: 'muted' }, 'No indexed LiDAR project in this view. The index currently covers the Halifax County 2018 acquisitions.'));
+    lidarList.append(h('p', { class: 'muted' }, 'No indexed point-cloud project in this view. The index currently covers the Halifax County 2018 acquisitions.'));
     return;
   }
   for (const p of here) lidarList.append(projectCard(p, p.tiles, p.points, p.bytes, () => map.fitBounds(p.bbox as LngLatBoundsLike, { padding: 40 })));
@@ -183,7 +189,7 @@ function projectCard(p: Project, tiles: number, points: number, bytes: number, o
 
 function renderTileList(tiles: LidarTile[]) {
   clear(lidarList);
-  if (!tiles.length) { lidarList.append(h('p', { class: 'muted' }, 'No LiDAR tiles in this view.')); return; }
+  if (!tiles.length) { lidarList.append(h('p', { class: 'muted' }, 'No point-cloud tiles in this view.')); return; }
   const byProject = new Map<string, LidarTile[]>();
   for (const t of tiles) (byProject.get(t.project) ?? byProject.set(t.project, []).get(t.project)!).push(t);
   for (const [pid, ts] of byProject) {
@@ -241,17 +247,23 @@ function areaKm2Of(t: LidarTile) {
   return (t.xmax - t.xmin) * 111.32 * Math.cos(lat) * (t.ymax - t.ymin) * 110.57;
 }
 
-// ── Elevation (HRDEM) ───────────────────────────────────────────────────────
+// ── Rasters (HRDEM) ─────────────────────────────────────────────────────────
+// LiDAR-derived rasters: each HRDEM item offers DTM and DSM products, each
+// drawn as hillshade, elevation or shaded elevation. Every product added is
+// its own map layer, listed under "On the map" with its own controls.
 
-const elevList = document.getElementById('elev-list')!;
+const rasterList = document.getElementById('raster-list')!;
+const rasterLayersEl = document.getElementById('raster-layers')!;
 let hrdemItems: HrdemItem[] = [];
-interface ElevLayer { item: HrdemItem; surface: 'dtm' | 'dsm'; mode: CogMode; min: number; max: number; opacity: number; v: number }
-const elevLayers = new Map<string, ElevLayer>();
-const elevId = (it: HrdemItem) => `hrdem:${it.id}`;
-
 let hrdemElsewhere: HrdemItem[] = [];
 
-document.getElementById('elev-search')!.addEventListener('click', async () => {
+interface RasterLayer { id: string; item: HrdemItem; product: RasterProduct; min: number; max: number; opacity: number; v: number }
+/** Layers on the map, in the order added (last is drawn on top). */
+const rasterLayers: RasterLayer[] = [];
+const layerId = (it: HrdemItem, p: RasterProduct) => `hrdem:${it.id}:${p.id}`;
+const itemName = (it: HrdemItem) => (it.kind === 'project' ? it.id : `National ${it.kind.replace('mosaic-', '')} mosaic`);
+
+document.getElementById('raster-search')!.addEventListener('click', async () => {
   say('Searching the NRCan STAC…');
   try {
     const vb = viewBox();
@@ -271,77 +283,98 @@ document.getElementById('elev-search')!.addEventListener('click', async () => {
       if (g) features.push({ type: 'Feature', id: hrdemItems.length - 1, properties: { id: it.id }, geometry: g });
     });
     (map.getSource('hrdem-footprints') as GeoJSONSource).setData({ type: 'FeatureCollection', features });
-    say(`${hrdemItems.length} HRDEM item${hrdemItems.length === 1 ? '' : 's'} cover this view.`);
-    renderElevList();
-  } catch (e) { say(`HRDEM search failed: ${(e as Error).message}`, 'error'); }
+    say(`${hrdemItems.length} raster source${hrdemItems.length === 1 ? '' : 's'} cover this view.`);
+    renderRasterList();
+  } catch (e) { say(`Raster search failed: ${(e as Error).message}`, 'error'); }
 });
 
-function renderElevList() {
-  clear(elevList);
-  if (!hrdemItems.length) { elevList.append(h('p', { class: 'muted' }, 'No HRDEM here.')); return; }
+function renderRasterList() {
+  clear(rasterList);
+  if (!hrdemItems.length) { rasterList.append(h('p', { class: 'muted' }, 'No HRDEM rasters here.')); return; }
   hrdemItems.forEach((it, n) => {
-    const on = elevLayers.get(elevId(it));
+    const products = productsFor(it);
+    const pick = h('select', { 'aria-label': `Product from ${itemName(it)}` },
+      ...products.map(p => h('option', { value: p.id, title: p.hint }, p.label)));
     const card = h('div', { class: 'card static' },
       h('span', { class: 'card-body' },
-        h('strong', {}, it.kind === 'project' ? it.id : `National ${it.kind.replace('mosaic-', '')} mosaic`),
-        h('span', { class: 'muted' }, `${it.kind === 'project' ? 'LiDAR project' : 'Mosaic'}${it.datetime ? ` · ${fmtDate(it.datetime)}` : ''} · ${it.kind === 'mosaic-2m' ? '2' : '1'} m · CGVD2013`),
-        on ? elevControls(it, on) : h('span', { class: 'row' },
-          h('button', { class: 'btn', onclick: () => void showElev(it, 'dtm') }, 'Show DTM'),
-          it.dsm ? h('button', { class: 'btn ghost', onclick: () => void showElev(it, 'dsm') }, 'DSM') : null)));
+        h('strong', {}, itemName(it)),
+        h('span', { class: 'muted' }, `${it.kind === 'project' ? 'LiDAR project' : 'Mosaic'}${it.datetime ? ` · ${fmtDate(it.datetime)}` : ''} · ${it.kind === 'mosaic-2m' ? '2' : '1'} m · CGVD2013${it.dsm ? '' : ' · DTM only'}`),
+        h('span', { class: 'row' }, pick,
+          h('button', { class: 'btn', onclick: () => void addRaster(it, productById(pick.value)!) }, 'Add'))));
     if (it.kind === 'project') {
       card.addEventListener('mouseenter', () => map.setFeatureState({ source: 'hrdem-footprints', id: n }, { hover: true }));
       card.addEventListener('mouseleave', () => map.setFeatureState({ source: 'hrdem-footprints', id: n }, { hover: false }));
     }
-    elevList.append(card);
+    rasterList.append(card);
   });
   if (hrdemElsewhere.length) {
-    elevList.append(h('details', { class: 'muted small' },
+    rasterList.append(h('details', { class: 'muted small' },
       h('summary', {}, `Elsewhere nearby (${hrdemElsewhere.length})`),
       h('p', {}, 'Their bounding boxes reach this view but their surveys do not: ' + hrdemElsewhere.map(i => i.id).join(', ') + '.')));
   }
 }
 
-function elevControls(it: HrdemItem, L: ElevLayer) {
-  const id = elevId(it);
-  const refresh = () => {
-    setCogStyle(id, { mode: L.mode, min: L.min, max: L.max });
-    L.v++;
-    (map.getSource(id) as maplibregl.RasterTileSource).setTiles([`cog://${encodeURIComponent(id)}/{z}/{x}/{y}?v=${L.v}`]);
-  };
-  const minIn = h('input', { type: 'number', value: String(L.min), step: '1', 'aria-label': 'Minimum elevation (m)', onchange: (e: Event) => { L.min = +(e.target as HTMLInputElement).value; refresh(); } });
-  const maxIn = h('input', { type: 'number', value: String(L.max), step: '1', 'aria-label': 'Maximum elevation (m)', onchange: (e: Event) => { L.max = +(e.target as HTMLInputElement).value; refresh(); } });
-  return h('span', { class: 'controls' },
-    h('span', { class: 'row' },
-      h('select', { 'aria-label': 'Rendering', onchange: (e: Event) => { L.mode = (e.target as HTMLSelectElement).value as CogMode; refresh(); renderElevList(); } },
-        ...(['hillshade', 'elevation'] as const).map(m => h('option', { value: m, selected: L.mode === m }, m === 'hillshade' ? 'Hillshade' : 'Elevation tint'))),
-      h('span', { class: 'muted' }, L.surface.toUpperCase()),
-      h('button', { class: 'btn ghost', onclick: () => removeElev(it) }, 'Remove')),
-    L.mode === 'elevation' ? h('span', { class: 'row' }, h('label', {}, 'Min ', minIn), h('label', {}, 'Max ', maxIn), h('span', { class: 'muted' }, 'm')) : null,
-    h('label', { class: 'row' }, 'Opacity',
-      h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(L.opacity), oninput: (e: Event) => { L.opacity = +(e.target as HTMLInputElement).value; map.setPaintProperty(id, 'raster-opacity', L.opacity); } })));
+function renderRasterLayers() {
+  clear(rasterLayersEl);
+  if (!rasterLayers.length) return;
+  rasterLayersEl.append(h('h2', {}, 'On the map'));
+  for (const L of [...rasterLayers].reverse()) rasterLayersEl.append(rasterLayerCard(L));
 }
 
-async function showElev(it: HrdemItem, surface: 'dtm' | 'dsm') {
-  const id = elevId(it);
-  say(`Opening ${it.id} ${surface.toUpperCase()}…`);
+function rasterLayerCard(L: RasterLayer) {
+  const refresh = () => {
+    setCogStyle(L.id, { min: L.min, max: L.max });
+    L.v++;
+    (map.getSource(L.id) as maplibregl.RasterTileSource).setTiles([`cog://${encodeURIComponent(L.id)}/{z}/{x}/{y}?v=${L.v}`]);
+  };
+  const minIn = h('input', { type: 'number', value: String(L.min), step: '1', 'aria-label': 'Ramp minimum (m)', onchange: (e: Event) => { L.min = +(e.target as HTMLInputElement).value; refresh(); } });
+  const maxIn = h('input', { type: 'number', value: String(L.max), step: '1', 'aria-label': 'Ramp maximum (m)', onchange: (e: Event) => { L.max = +(e.target as HTMLInputElement).value; refresh(); } });
+  const fit = async () => {
+    const r = await sampleRange(L.id, viewBox()).catch(() => null);
+    if (!r) { say(`${L.product.label}: no data in this view to fit to.`); return; }
+    [L.min, L.max] = r;
+    minIn.value = String(L.min); maxIn.value = String(L.max);
+    refresh();
+  };
+  return h('div', { class: 'card static on-map' },
+    h('span', { class: 'card-body' },
+      h('span', { class: 'row spread' },
+        h('strong', { title: L.product.hint }, L.product.label),
+        h('button', { class: 'btn ghost small-btn', onclick: () => removeRaster(L) }, 'Remove')),
+      h('span', { class: 'muted' }, itemName(L.item)),
+      usesRange(L.product.mode) ? h('span', { class: 'row' },
+        h('label', {}, 'Min ', minIn), h('label', {}, 'Max ', maxIn), h('span', { class: 'muted' }, 'm'),
+        h('button', { class: 'btn ghost small-btn', onclick: () => void fit() }, 'Fit to view')) : null,
+      h('label', { class: 'row' }, 'Opacity',
+        h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(L.opacity), oninput: (e: Event) => { L.opacity = +(e.target as HTMLInputElement).value; map.setPaintProperty(L.id, 'raster-opacity', L.opacity); } }))));
+}
+
+async function addRaster(it: HrdemItem, p: RasterProduct) {
+  const id = layerId(it, p);
+  if (rasterLayers.some(L => L.id === id)) { say(`${p.label} from ${itemName(it)} is already on the map.`); return; }
+  say(`Opening ${itemName(it)} ${p.surface.toUpperCase()}…`);
   try {
-    const L: ElevLayer = { item: it, surface, mode: 'hillshade', min: 0, max: 150, opacity: 1, v: 0 };
-    const cog = await openCog(id, surface === 'dsm' ? it.dsm! : it.dtm, { mode: L.mode, min: L.min, max: L.max });
+    const L: RasterLayer = { id, item: it, product: p, min: 0, max: 150, opacity: 1, v: 0 };
+    const cog = await openCog(id, p.surface === 'dsm' ? it.dsm! : it.dtm, { mode: p.mode, min: L.min, max: L.max });
+    // A colour ramp starts stretched to what is in view, not to a fixed range.
+    if (usesRange(p.mode)) {
+      const r = await sampleRange(id, viewBox()).catch(() => null);
+      if (r) { [L.min, L.max] = r; setCogStyle(id, { min: L.min, max: L.max }); }
+    }
     map.addSource(id, { type: 'raster', tiles: [`cog://${encodeURIComponent(id)}/{z}/{x}/{y}`], tileSize: 256, bounds: cog.bounds, maxzoom: 18 });
     map.addLayer({ id, type: 'raster', source: id, paint: { 'raster-opacity': L.opacity, 'raster-fade-duration': 0 } }, 'anchor-lidar');
-    elevLayers.set(id, L);
-    say(`${it.id}: ${cog.width.toLocaleString()} × ${cog.height.toLocaleString()} px at ${cog.resolution} m, ${cog.levels} levels, EPSG:${cog.epsg}.`);
-    renderElevList();
-  } catch (e) { say(`Could not open ${it.id}: ${(e as Error).message}`, 'error'); }
+    rasterLayers.push(L);
+    say(`${p.label}: ${cog.width.toLocaleString()} × ${cog.height.toLocaleString()} px at ${cog.resolution} m, EPSG:${cog.epsg}.`);
+    renderRasterLayers();
+  } catch (e) { closeCog(id); say(`Could not open ${itemName(it)}: ${(e as Error).message}`, 'error'); }
 }
 
-function removeElev(it: HrdemItem) {
-  const id = elevId(it);
-  if (map.getLayer(id)) map.removeLayer(id);
-  if (map.getSource(id)) map.removeSource(id);
-  closeCog(id);
-  elevLayers.delete(id);
-  renderElevList();
+function removeRaster(L: RasterLayer) {
+  if (map.getLayer(L.id)) map.removeLayer(L.id);
+  if (map.getSource(L.id)) map.removeSource(L.id);
+  closeCog(L.id);
+  rasterLayers.splice(rasterLayers.indexOf(L), 1);
+  renderRasterLayers();
 }
 
 // ── Imagery (Sentinel-2) ────────────────────────────────────────────────────

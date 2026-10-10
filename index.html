@@ -5,31 +5,32 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>STAC Viewer</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%232b6e4f%22/%3E%3Cpath d=%22M4 24l8-10 6 7 4-4 6 7z%22 fill=%22%23fff%22/%3E%3C/svg%3E">
-  <meta name="description" content="LiDAR point-cloud coverage, HRDEM elevation and Sentinel-2 imagery for Canada, searched and drawn in the browser.">
+  <meta name="description" content="LiDAR point clouds, LiDAR-derived elevation rasters and Sentinel-2 imagery for Canada, searched and drawn in the browser.">
 </head>
 <body>
   <div id="app">
     <aside id="side">
       <header>
         <h1>STAC Viewer</h1>
-        <p class="muted small">LiDAR, elevation and imagery, straight from public cloud storage.</p>
+        <p class="muted small">LiDAR point clouds and rasters, and satellite imagery, straight from public cloud storage.</p>
       </header>
       <nav class="tabs" role="tablist">
-        <button class="tab" role="tab" data-tab="lidar" aria-selected="true">LiDAR</button>
-        <button class="tab" role="tab" data-tab="elev" aria-selected="false">Elevation</button>
+        <button class="tab" role="tab" data-tab="pc" aria-selected="true">Point clouds</button>
+        <button class="tab" role="tab" data-tab="raster" aria-selected="false">Rasters</button>
         <button class="tab" role="tab" data-tab="img" aria-selected="false">Imagery</button>
       </nav>
 
-      <section class="pane" id="pane-lidar">
+      <section class="pane" id="pane-pc">
         <p class="muted small">NRCan CanElevation point clouds (COPC). The list follows the map.</p>
         <p id="lidar-stats" class="stats small"></p>
         <div id="lidar-list" class="list"></div>
       </section>
 
-      <section class="pane" id="pane-elev" hidden>
-        <p class="muted small">NRCan HRDEM 1 m DTM and DSM, per LiDAR project and as national mosaics.</p>
-        <button id="elev-search" class="btn wide">Search this view</button>
-        <div id="elev-list" class="list"></div>
+      <section class="pane" id="pane-raster" hidden>
+        <p class="muted small">LiDAR-derived rasters from NRCan HRDEM: the DTM (bare earth) and DSM (surface, incl. trees and buildings), per LiDAR project and as national mosaics. Each as hillshade, elevation or shaded elevation.</p>
+        <div id="raster-layers" class="list"></div>
+        <button id="raster-search" class="btn wide">Search this view</button>
+        <div id="raster-list" class="list"></div>
       </section>
 
       <section class="pane" id="pane-img" hidden>

@@ -137,3 +137,19 @@ export function hillshade(elev: Float32Array, w: number, h: number, cellM: numbe
   }
   return out;
 }
+
+/**
+ * The [lo, hi] percentiles of the finite values, rounded outward to whole
+ * metres — the default stretch for an elevation ramp. Null when nothing is
+ * finite. Pure.
+ */
+export function percentileRange(values: ArrayLike<number>, isValid: (v: number) => boolean, lo = 0.02, hi = 0.98): [number, number] | null {
+  const v: number[] = [];
+  for (let i = 0; i < values.length; i++) if (isValid(values[i])) v.push(values[i]);
+  if (!v.length) return null;
+  v.sort((a, b) => a - b);
+  const at = (q: number) => v[Math.min(v.length - 1, Math.max(0, Math.round(q * (v.length - 1))))];
+  let a = Math.floor(at(lo)), b = Math.ceil(at(hi));
+  if (b <= a) b = a + 1;
+  return [a, b];
+}

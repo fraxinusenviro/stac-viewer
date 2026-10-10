@@ -13,14 +13,16 @@ import { fromUrl, type GeoTIFF, type GeoTIFFImage } from 'geotiff';
 import { projDef } from './crs.ts';
 import {
   TILE, TERRAIN, chooseLevel, controlGrid, gridWindow, hillshade, interpGrid, metresPerPixel,
-  rampColour, tileBounds,
+  percentileRange, rampColour, tileBounds,
 } from './warp.ts';
 
-export type CogMode = 'rgb' | 'hillshade' | 'elevation';
+/** `rgb`: a 3-band picture. The rest read band 1 as heights: `hillshade` relief,
+ * `elevation` a colour ramp, `shaded` the ramp over the hillshade. */
+export type CogMode = 'rgb' | 'hillshade' | 'elevation' | 'shaded';
 
 export interface CogStyle {
   mode: CogMode;
-  /** Elevation tint range, metres (elevation mode). */
+  /** Colour-ramp range, metres (elevation and shaded modes). */
   min: number;
   max: number;
 }
@@ -95,6 +97,30 @@ export function setCogStyle(id: string, style: Partial<CogStyle>): void {
 
 export function closeCog(id: string): void { sources.delete(id); }
 
+/** A height is real: not the file's nodata, not NaN, not HRDEM's -32767 fill. */
+const validHeight = (nd: number | null) => (v: number) => v !== nd && Number.isFinite(v) && v > -1000;
+
+/**
+ * The 2nd–98th percentile of heights inside a lon/lat box, from an overview
+ * no wider than ~512 px over that box — the "fit to view" stretch. Null when
+ * the box holds no data.
+ */
+export async function sampleRange(id: string, box: [number, number, number, number]): Promise<[number, number] | null> {
+  const src = sources.get(id);
+  if (!src) return null;
+  const pts: [number, number][] = [];
+  for (const fx of [0, 0.5, 1]) for (const fy of [0, 0.5, 1]) pts.push([box[0] + fx * (box[2] - box[0]), box[1] + fy * (box[3] - box[1])]);
+  const px = pts.map(p => { const [x, y] = src.toSrc(p); return [(x - src.geo.originX) / src.geo.resX, (y - src.geo.originY) / src.geo.resY]; });
+  const c0 = Math.max(0, Math.min(...px.map(p => p[0]))), c1 = Math.min(src.width, Math.max(...px.map(p => p[0])));
+  const r0 = Math.max(0, Math.min(...px.map(p => p[1]))), r1 = Math.min(src.height, Math.max(...px.map(p => p[1])));
+  if (c1 <= c0 || r1 <= r0) return null;
+  const level = chooseLevel(src.factors, Math.max(c1 - c0, r1 - r0) / 512);
+  const f = src.factors[level], img = src.images[level];
+  const win = [Math.floor(c0 / f), Math.floor(r0 / f), Math.max(Math.floor(c0 / f) + 1, Math.ceil(c1 / f)), Math.max(Math.floor(r0 / f) + 1, Math.ceil(r1 / f))];
+  const data = (await img.readRasters({ window: win, samples: [0], interleave: false })) as unknown as ArrayLike<number>[];
+  return percentileRange(data[0], validHeight(src.nodata));
+}
+
 // A transparent tile. MapLibre fails (and logs) on an empty body, and it may
 // transfer the buffer it is handed, so every caller gets a fresh copy.
 let blank: Promise<ArrayBuffer> | null = null;
@@ -161,11 +187,12 @@ async function renderTile(src: CogSource, z: number, x: number, y: number, signa
     }
   } else {
     const elev = new Float32Array(size * size);
+    const valid = validHeight(nd);
     const band = data[0];
     for (let py = 0; py < size; py++) for (let px = 0; px < size; px++) {
       const k = at(px + 0.5, py + 0.5);
       const v = k < 0 ? NaN : band[k];
-      elev[py * size + px] = v === nd || !Number.isFinite(v) || v < -1000 ? NaN : v;
+      elev[py * size + px] = valid(v) ? v : NaN;
     }
     const lat = (tb[1] + tb[3]) / 2;
     const hs = hillshade(elev, size, size, metresPerPixel(lat, z));
@@ -177,6 +204,9 @@ async function renderTile(src: CogSource, z: number, x: number, y: number, signa
       const o = i * 4;
       const light = Number.isFinite(s) ? 0.35 + 0.65 * s : 0.75;
       if (src.style.mode === 'elevation') {
+        const [r, g, b] = rampColour(TERRAIN, (e - min) / (max - min || 1));
+        rgba[o] = r; rgba[o + 1] = g; rgba[o + 2] = b;
+      } else if (src.style.mode === 'shaded') {
         const [r, g, b] = rampColour(TERRAIN, (e - min) / (max - min || 1));
         rgba[o] = r * light; rgba[o + 1] = g * light; rgba[o + 2] = b * light;
       } else {
