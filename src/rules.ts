@@ -12,14 +12,26 @@
 // shared; `parseRuleSet` refuses anything it does not understand rather than
 // guessing.
 
-import { variableById, needsLeafOff, type ClassDef, type Planes, type Product, type ProductStyle } from './products.ts';
+import { variableById, needsLeafOff, sharpeningFor, type ClassDef, type Planes, type Product, type ProductStyle, type Variable } from './products.ts';
+import { DEFAULT_UNMIX, type UnmixParams } from './unmix.ts';
 
 export type Op = '<' | '<=' | '>' | '>=' | 'between';
 export const OPS: Op[] = ['>=', '>', '<', '<=', 'between'];
 
 export interface Condition { v: string; op: Op; a: number; b?: number }
 export interface Rule { label: string; colour: string; when: Condition[]; off?: boolean }
-export interface RuleSet { name: string; maskClouds: boolean; rules: Rule[] }
+export interface RuleSet {
+  name: string; maskClouds: boolean; rules: Rule[];
+  /** How LiDAR-sharpened variables are unmixed (absent: the defaults). */
+  sharpen?: UnmixParams;
+}
+
+/** The variables an enabled rule reads. */
+export function ruleVariables(rs: RuleSet): Variable[] {
+  const ids = new Set<string>();
+  for (const r of rs.rules) if (!r.off) for (const c of r.when) ids.add(c.v);
+  return [...ids].map(id => variableById.get(id)).filter((v): v is Variable => !!v);
+}
 
 /** The class value a masked pixel takes. */
 export const MASKED = 255;
@@ -89,7 +101,7 @@ export function compileRuleSet(rs: RuleSet): Product {
   const maskKeys = rs.maskClouds ? inputs.filter(k => k.endsWith(':scl')) : [];
   return {
     id: `rules:${JSON.stringify(rs)}`, label: rs.name || 'Rule-based classes', group: 'Fusion classes',
-    inputs, render: 'classes', pad: 0,
+    inputs, render: 'classes', pad: 0, sharpen: sharpeningFor(ruleVariables(rs), rs.sharpen ?? DEFAULT_UNMIX),
     classes: maskKeys.length ? [...classes, MASK_CLASS] : classes,
     channels: [{
       label: 'Class', unit: 'class', step: 1, seed: [0, 255],
@@ -124,7 +136,16 @@ export function parseRuleSet(x: unknown): RuleSet {
     });
     return { label: r.label, colour: r.colour, when, ...(r.off ? { off: true } : {}) };
   });
-  return { name: typeof o.name === 'string' ? o.name : 'Imported rules', maskClouds: o.maskClouds !== false, rules };
+  let sharpen: UnmixParams | undefined;
+  if (o.sharpen !== undefined) {
+    const sp = o.sharpen as Partial<UnmixParams>;
+    const breaks = Array.isArray(sp.breaks) ? sp.breaks : [];
+    if (!breaks.length || breaks.some((b, i) => !Number.isFinite(b) || (i && b <= breaks[i - 1]))) throw new Error('sharpen.breaks must be ascending numbers');
+    if (!Number.isInteger(sp.radius) || sp.radius! < 1 || sp.radius! > 6) throw new Error('sharpen.radius must be a whole number from 1 to 6');
+    if (!Number.isFinite(sp.ridge) || sp.ridge! < 0) throw new Error('sharpen.ridge must be a number ≥ 0');
+    sharpen = { breaks, radius: sp.radius!, ridge: sp.ridge! };
+  }
+  return { name: typeof o.name === 'string' ? o.name : 'Imported rules', maskClouds: o.maskClouds !== false, rules, ...(sharpen ? { sharpen } : {}) };
 }
 
 // ── Presets ─────────────────────────────────────────────────────────────────
@@ -161,6 +182,26 @@ export const PRESETS: RuleSet[] = [
       { label: 'Coniferous', colour: '#00441b', when: [c('chm', '>=', 5), c('ndvi', '>=', 0.5), c('d_ndvi', '<', 0.15)] },
       { label: 'Mixedwood', colour: '#41ab5d', when: [c('chm', '>=', 5), c('ndvi', '>=', 0.5), c('d_ndvi', 'between', 0.15, 0.3)] },
       { label: 'Broadleaf', colour: '#c2e699', when: [c('chm', '>=', 5), c('ndvi', '>=', 0.5), c('d_ndvi', '>', 0.3)] },
+    ],
+  },
+  {
+    // FieldMapper's conifer index, calibrated to the view: positive leans
+    // coniferous, negative broadleaf; ±0.25 is FieldMapper's own transition
+    // width. Press "Calibrate to this view" first.
+    name: 'Forest type — conifer index (FieldMapper method)', maskClouds: true, rules: [
+      { label: 'Coniferous', colour: '#00441b', when: [c('ci', '>=', 0.25)] },
+      { label: 'Mixed or uncertain', colour: '#41ab5d', when: [c('ci', 'between', -0.25, 0.25)] },
+      { label: 'Broadleaf', colour: '#c2e699', when: [c('ci', '<=', -0.25)] },
+    ],
+  },
+  {
+    // The two-scene rules on LiDAR-sharpened spectra: each 1 m canopy pixel
+    // reads the unmixed canopy spectrum of its neighbourhood rather than the
+    // 10 m mixture of crowns, gaps and ground.
+    name: 'Forest type — two scenes, LiDAR-sharpened', maskClouds: true, rules: [
+      { label: 'Coniferous', colour: '#00441b', when: [c('chm', '>=', 5), c('s_ndvi', '>=', 0.5), c('s_d_ndvi', '<', 0.15)] },
+      { label: 'Mixedwood', colour: '#41ab5d', when: [c('chm', '>=', 5), c('s_ndvi', '>=', 0.5), c('s_d_ndvi', 'between', 0.15, 0.3)] },
+      { label: 'Broadleaf', colour: '#c2e699', when: [c('chm', '>=', 5), c('s_ndvi', '>=', 0.5), c('s_d_ndvi', '>', 0.3)] },
     ],
   },
   { name: 'Empty', maskClouds: true, rules: [] },

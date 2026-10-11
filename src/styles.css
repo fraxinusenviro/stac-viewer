@@ -91,6 +91,7 @@ details.panel[open] > summary { margin-bottom: 6px; }
 .panel input[type=number] { width: 84px; }
 .on-map details { display: flex; flex-direction: column; gap: 6px; }
 
+.panel select { max-width: 100%; min-width: 0; }
 .check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .check input { flex: none; width: 18px; height: 18px; margin: 0; }
 .rule { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; }

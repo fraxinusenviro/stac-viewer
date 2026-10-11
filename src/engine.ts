@@ -22,6 +22,7 @@ import { fromUrl, type GeoTIFF, type GeoTIFFImage } from 'geotiff';
 import { projDef } from './crs.ts';
 import { paint, channelStats, classCounts, type ChannelStats } from './paint.ts';
 import { paintSpec, type ChannelFn, type Planes, type Product, type ProductStyle } from './products.ts';
+import { unmix, type UnmixParams } from './unmix.ts';
 import {
   TILE, boxGrid, chooseLevel, controlGrid, gridWindow, interpGrid, metresPerPixel, tileBounds, tileGrid,
   type Geo, type LonLatBox, type OutGrid,
@@ -49,7 +50,10 @@ export function openFile(url: string): Promise<CogFile> {
   let p = files.get(url);
   if (!p) {
     p = (async () => {
-      const tiff: GeoTIFF = await fromUrl(url, { allowFullFile: false });
+      // A larger block cache than geotiff's default (100 × 64 KiB), so many
+      // tiles reading one file at once do not evict each other's blocks
+      // (geotiff accepts the option; its typings omit it).
+      const tiff: GeoTIFF = await fromUrl(url, { allowFullFile: false, cacheSize: 1024 } as Parameters<typeof fromUrl>[1]);
       const count = await tiff.getImageCount();
       const all: GeoTIFFImage[] = [];
       for (let i = 0; i < count; i++) all.push(await tiff.getImage(i));
@@ -93,6 +97,16 @@ export interface InputSource {
   minValid?: number;
 }
 
+/** A window read that has not finished in this long is abandoned (and retried once on a fresh file). */
+const READ_DEADLINE_MS = 20000;
+
+function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`read did not finish in ${ms / 1000} s`)), ms);
+    p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+  });
+}
+
 /** Above this many source pixels per input a grid is left blank rather than read. */
 const MAX_WINDOW_PX = 4_000_000;
 
@@ -101,7 +115,7 @@ const MAX_WINDOW_PX = 4_000_000;
  * read together (the TCI's three samples are one window). Every requested
  * key gets a plane; a file that fails or does not cover the grid gives NaN.
  */
-async function samplePlanes(sources: Record<string, InputSource>, out: OutGrid): Promise<Planes> {
+async function samplePlanes(sources: Record<string, InputSource>, out: OutGrid, idKeys: Set<string> = new Set()): Promise<Planes> {
   const n = out.w * out.h;
   const planes: Planes = {};
   const byUrl = new Map<string, [string, InputSource][]>();
@@ -126,9 +140,20 @@ async function samplePlanes(sources: Record<string, InputSource>, out: OutGrid):
     // One retry: geotiff occasionally decodes a block from a short buffer when
     // several tiles fetch overlapping blocks at once. No abort signal goes in,
     // because a cancelled block read can poison geotiff's shared block cache.
+    // Every read has a deadline, raced rather than signalled (geotiff ignores
+    // a signal mid-block and an aborted block can poison its cache). A read
+    // that fails or overruns is retried ONCE on a freshly opened file, whose
+    // block cache cannot hold whatever wedged the first; a second failure
+    // leaves this input blank for this grid rather than stalling the caller.
     let data: ArrayLike<number>[] | null = null;
     for (let attempt = 0; attempt < 2 && !data; attempt++) {
-      try { data = (await img.readRasters({ window: win, samples, interleave: false })) as unknown as ArrayLike<number>[]; } catch (e) { if (attempt) console.warn(`[cog] ${url.split('/').pop()}:`, e); }
+      try {
+        const im = attempt ? (await openFile(url)).images[level] : img;
+        data = (await withDeadline(im.readRasters({ window: win, samples, interleave: false }), READ_DEADLINE_MS)) as unknown as ArrayLike<number>[];
+      } catch (e) {
+        files.delete(url);
+        if (attempt) console.warn(`[cog] ${url.split('/').pop()}:`, (e as Error).message ?? e);
+      }
     }
     if (!data) return;
     const p: [number, number] = [0, 0];
@@ -137,6 +162,15 @@ async function samplePlanes(sources: Record<string, InputSource>, out: OutGrid):
       interpGrid(grid, px + 0.5, py + 0.5, p);
       const col = Math.floor(p[0] / fac) - win[0], row = Math.floor(p[1] / fac) - win[1];
       at[py * out.w + px] = col < 0 || row < 0 || col >= ww || row >= wh ? -1 : row * ww + col;
+    }
+    for (const [k] of entries) {
+      if (!idKeys.has(k)) continue;
+      // The source pixel each output pixel fell in, as row × width + col of the
+      // window (small enough to stay exact in a Float32), for unmixing.
+      const ids = new Float32Array(n).fill(NaN);
+      for (let i = 0; i < n; i++) if (at[i] >= 0) ids[i] = at[i];
+      planes[`px:${k}`] = ids;
+      planes[`pxw:${k}`] = Float32Array.of(ww);
     }
     for (const [k, s] of entries) {
       const band = data[samples.indexOf(s.sample)];
@@ -155,6 +189,30 @@ async function samplePlanes(sources: Record<string, InputSource>, out: OutGrid):
   return planes;
 }
 
+/**
+ * Sample, then sharpen the imagery inputs a product asks for with the CHM
+ * (unmix.ts), each scene against its own pixel grid. The sharpened planes are
+ * added as `u:<key>`; where a grid is too coarse to unmix they equal the raw.
+ */
+async function planesFor(sources: Record<string, InputSource>, out: OutGrid, sharpen?: { keys: string[]; params: UnmixParams }): Promise<Planes> {
+  if (!sharpen) return samplePlanes(sources, out);
+  const byScene = new Map<string, string[]>();
+  for (const k of sharpen.keys) { const sc = k.split(':')[0]; (byScene.get(sc) ?? byScene.set(sc, []).get(sc)!).push(k); }
+  // The id grid of each scene is read off its first 10 m band when there is one (20 m bands share it, 2 × 2).
+  const tenM = ['blue', 'green', 'red', 'nir'];
+  const refs = new Map([...byScene].map(([sc, ks]) => [sc, ks.find(k => tenM.includes(k.split(':')[1])) ?? ks[0]]));
+  const planes = await samplePlanes(sources, out, new Set(refs.values()));
+  const dsm = planes['lidar:dsm'], dtm = planes['lidar:dtm'];
+  const chm = new Float32Array(out.w * out.h);
+  for (let i = 0; i < chm.length; i++) { const d = dsm[i] - dtm[i]; chm[i] = d !== d ? NaN : Math.max(0, d); }
+  for (const [sc, ks] of byScene) {
+    const ref = refs.get(sc)!;
+    const r = unmix({ ids: planes[`px:${ref}`], idWidth: planes[`pxw:${ref}`]?.[0] ?? 1, chm, bands: Object.fromEntries(ks.map(k => [k, planes[k]])) }, sharpen.params);
+    for (const k of ks) planes[`u:${k}`] = r.bands[k];
+  }
+  return planes;
+}
+
 // ── Layers ──────────────────────────────────────────────────────────────────
 
 export interface LayerDef {
@@ -166,7 +224,7 @@ export interface LayerDef {
 interface Layer extends LayerDef { sig: string; bounds: LonLatBox | null }
 const layers = new Map<string, Layer>();
 
-const sigOf = (d: LayerDef) => JSON.stringify([d.product.pad, Object.entries(d.sources).sort()]);
+const sigOf = (d: LayerDef) => JSON.stringify([d.product.pad, Object.entries(d.sources).sort(), d.product.sharpen ?? null]);
 
 /**
  * Register a layer: opens every input file (so a refused CRS fails here, not
@@ -207,7 +265,7 @@ function cachedPlanes(L: Layer, z: number, x: number, y: number): Promise<Planes
   if (hit) { cache.delete(key); cache.set(key, hit); return Promise.resolve(hit.planes); }
   let p = inflight.get(key);
   if (!p) {
-    p = samplePlanes(L.sources, tileGrid(z, x, y, L.product.pad)).then(planes => {
+    p = planesFor(L.sources, tileGrid(z, x, y, L.product.pad), L.product.sharpen).then(planes => {
       const bytes = Object.values(planes).reduce((s, a) => s + a.byteLength, 0);
       cache.set(key, { planes, bytes });
       cacheBytes += bytes;
@@ -287,7 +345,7 @@ export async function viewStats(id: string, box: LonLatBox): Promise<ViewStats |
   const midLat = ((box[1] + box[3]) / 2) * Math.PI / 180;
   const aspect = ((box[2] - box[0]) * Math.cos(midLat)) / (box[3] - box[1] || 1e-9);
   const w = Math.max(16, Math.round(aspect >= 1 ? 256 : 256 * aspect)), h = Math.max(16, Math.round(aspect >= 1 ? 256 / aspect : 256));
-  const planes = await samplePlanes(L.sources, boxGrid(box, w, h));
+  const planes = await planesFor(L.sources, boxGrid(box, w, h), L.product.sharpen);
   const chan = channelValues(L.product, L.style, planes, w * h);
   if (L.product.render === 'classes') {
     const counts = classCounts(chan[0]);
@@ -305,15 +363,29 @@ export async function viewStats(id: string, box: LonLatBox): Promise<ViewStats |
  * tapped on the map. Averaging over a few metres keeps a 1 m canopy height
  * from landing in the gap between two crowns. NaN where nothing was finite.
  */
-export async function samplePoint(sources: Record<string, InputSource>, lon: number, lat: number, fns: Record<string, ChannelFn>, style: ProductStyle, radiusM = 2): Promise<Record<string, number>> {
-  const dLat = radiusM / 111320, dLon = radiusM / (111320 * Math.cos((lat * Math.PI) / 180));
-  const n = 5;
-  const planes = await samplePlanes(sources, boxGrid([lon - dLon, lat - dLat, lon + dLon, lat + dLat], n, n));
+export async function samplePoint(sources: Record<string, InputSource>, lon: number, lat: number, fns: Record<string, ChannelFn>, style: ProductStyle, radiusM = 2, sharpen?: { keys: string[]; params: UnmixParams }): Promise<Record<string, number>> {
+  // Sharpening needs a neighbourhood of Sentinel pixels around the point, so
+  // the grid is then ±64 m at 2 m and only its centre is averaged.
+  const reach = sharpen ? 64 : radiusM, n = sharpen ? 64 : 5;
+  const dLat = reach / 111320, dLon = reach / (111320 * Math.cos((lat * Math.PI) / 180));
+  const planes = await planesFor(sources, boxGrid([lon - dLon, lat - dLat, lon + dLon, lat + dLat], n, n), sharpen);
+  const half = sharpen ? Math.max(1, Math.round(radiusM / (2 * reach / n))) : n;
+  const c0 = sharpen ? n / 2 - half : 0, c1 = sharpen ? n / 2 + half : n;
   const out: Record<string, number> = {};
   for (const [k, fn] of Object.entries(fns)) {
     let sum = 0, cnt = 0;
-    for (let i = 0; i < n * n; i++) { const v = fn(planes, i, style); if (Number.isFinite(v)) { sum += v; cnt++; } }
+    for (let r = c0; r < c1; r++) for (let c = c0; c < c1; c++) { const v = fn(planes, r * n + c, style); if (Number.isFinite(v)) { sum += v; cnt++; } }
     out[k] = cnt ? sum / cnt : NaN;
   }
   return out;
+}
+
+/** Every plane of a set of inputs over a view, on a ~256 px grid (for calibrations). */
+export async function sampleView(sources: Record<string, InputSource>, box: LonLatBox, sharpen?: { keys: string[]; params: UnmixParams }): Promise<{ planes: Planes; n: number }> {
+  const midLat = ((box[1] + box[3]) / 2) * Math.PI / 180;
+  const aspect = ((box[2] - box[0]) * Math.cos(midLat)) / (box[3] - box[1] || 1e-9);
+  // Sharpening needs several output pixels per Sentinel pixel, hence the finer grid.
+  const S = sharpen ? 512 : 256;
+  const w = Math.max(16, Math.round(aspect >= 1 ? S : S * aspect)), h = Math.max(16, Math.round(aspect >= 1 ? S / aspect : S));
+  return { planes: await planesFor(sources, boxGrid(box, w, h), sharpen), n: w * h };
 }

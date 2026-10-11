@@ -11,6 +11,8 @@
 // scenes), so the indices are computed on reflectance, not on raw DN.
 
 import type { Curve, PaintSpec, Render } from './paint.ts';
+import { DEFAULT_UNMIX, type UnmixParams } from './unmix.ts';
+import { coniferVariables } from './coniferIndex.ts';
 
 export type Planes = Record<string, Float32Array>;
 export type ChannelFn = (p: Planes, i: number, s: ProductStyle) => number;
@@ -68,6 +70,8 @@ export interface Product {
   pad: number;
   /** RGB: a pixel with one channel missing still paints (that channel dark). For fusion, where an index can be undefined over dark water while the others are not. */
   partial?: boolean;
+  /** Sharpen these imagery inputs with the CHM before the channels are computed (unmix.ts); channels read them as `u:<key>`. */
+  sharpen?: { keys: string[]; params: UnmixParams };
   /** One line under the picker: what the product is, and its formula. */
   note: string;
 }
@@ -99,8 +103,9 @@ export const bandTitle = (asset: string) => {
 /** Which scene an input comes from: `s2` the (leaf-on) scene, `s2b` the optional second, leaf-off one. */
 export type Scene = 's2' | 's2b';
 
-const band = (asset: string, scene: Scene = 's2'): Channel => {
-  const key = `${scene}:${asset}`;
+/** `pre` = 'u:' reads the LiDAR-sharpened plane of the input (unmix.ts) instead of the raw one. */
+const band = (asset: string, scene: Scene = 's2', pre = ''): Channel => {
+  const key = `${pre}${scene}:${asset}`;
   return { label: bandByAsset.get(asset)?.esa ?? asset, unit: 'reflectance', step: 0.001, seed: 'p2p98', fn: (p, i) => p[key][i] };
 };
 
@@ -141,8 +146,8 @@ const indexById = new Map(INDICES.map(x => [x.id, x]));
 export const MIN_INDEX_SIGNAL = 0.01;
 
 /** A channel computing an index per pixel from reflectance planes. */
-function indexChannel(ix: IndexDef, seed: Channel['seed'] = [-1, 1], scene: Scene = 's2'): Channel {
-  const keys = ix.bands.map(b => [b, `${scene}:${b}`] as const);
+function indexChannel(ix: IndexDef, seed: Channel['seed'] = [-1, 1], scene: Scene = 's2', pre = ''): Channel {
+  const keys = ix.bands.map(b => [b, `${pre}${scene}:${b}`] as const);
   const v: Record<string, number> = {};
   return {
     label: ix.label, unit: 'index', step: 0.01, domain: [-1, 1], seed,
@@ -266,7 +271,11 @@ export function rasterProductsFor(item: { dsm: string | null }): Product[] {
 // ── Fusion: LiDAR × imagery ─────────────────────────────────────────────────
 
 /** A variable a custom fusion channel can draw on. */
-export interface Variable { id: string; label: string; group: string; inputs: string[]; channel: Channel }
+export interface Variable {
+  id: string; label: string; group: string; inputs: string[]; channel: Channel;
+  /** The imagery inputs this variable reads LiDAR-sharpened (its channel reads `u:<key>`). */
+  sharpenKeys?: string[];
+}
 
 const FUSION_BANDS = S2_BANDS.filter(b => b.res <= 20);
 
@@ -292,7 +301,39 @@ export const FUSION_VARIABLES: Variable[] = [
   }),
   ...['nir', 'swir16'].map(a => deltaVariable(a, bandByAsset.get(a)!.esa, band(a), band(a, 's2b'), [`s2:${a}`, `s2b:${a}`])),
 ];
+/** The LiDAR-sharpened twin of an imagery variable: same formula, read on the unmixed bands. */
+function sharpenedTwins(): Variable[] {
+  const LIDAR = ['lidar:dsm', 'lidar:dtm'];
+  const out: Variable[] = [];
+  const twin = (base: Variable, channel: Channel): Variable => {
+    const keys = base.inputs.filter(k => k.startsWith('s2'));
+    return { id: `s_${base.id}`, label: `${base.label} · sharpened`, group: `LiDAR-sharpened ${base.group.toLowerCase()}`, inputs: [...new Set([...base.inputs, ...LIDAR])], channel, sharpenKeys: keys };
+  };
+  for (const v of FUSION_VARIABLES) {
+    if (v.group === 'LiDAR') continue;
+    const off = v.id.endsWith('_off'), scene: Scene = off ? 's2b' : 's2';
+    const baseId = v.id.replace(/_off$/, '').replace(/^d_/, '');
+    const ix = indexById.get(baseId), b = bandByAsset.get(baseId);
+    let ch: Channel | null = null;
+    if (v.id.startsWith('d_')) {
+      const on = ix ? indexChannel(ix, 'p2p98', 's2', 'u:') : band(baseId, 's2', 'u:');
+      const of = ix ? indexChannel(ix, 'p2p98', 's2b', 'u:') : band(baseId, 's2b', 'u:');
+      ch = { ...v.channel, fn: (p, i, st) => on.fn(p, i, st) - of.fn(p, i, st) };
+    } else if (ix) ch = indexChannel(ix, 'p2p98', scene, 'u:');
+    else if (b) ch = band(baseId, scene, 'u:');
+    if (ch) out.push(twin(v, { ...ch, label: `${v.channel.label} · sharpened` }));
+  }
+  return out;
+}
+FUSION_VARIABLES.push(...sharpenedTwins(), ...coniferVariables());
+
 export const variableById = new Map(FUSION_VARIABLES.map(v => [v.id, v]));
+
+/** The sharpening a set of variables needs (null: none). */
+export function sharpeningFor(vars: Variable[], params: UnmixParams = DEFAULT_UNMIX): Product['sharpen'] {
+  const keys = [...new Set(vars.flatMap(v => v.sharpenKeys ?? []))];
+  return keys.length ? { keys, params } : undefined;
+}
 /** Whether a variable needs the second (leaf-off) scene. */
 export const needsLeafOff = (v: Variable) => v.inputs.some(k => k.startsWith('s2b:'));
 
@@ -318,12 +359,20 @@ export const FUSION_PRODUCTS: Product[] = [
   },
 ];
 
+FUSION_PRODUCTS.push({
+  id: 'fusion-sharp-fcir', label: 'LiDAR-sharpened false colour (B08 · B04 · B03)', group: 'Fusion composites',
+  inputs: ['s2:nir', 's2:red', 's2:green', 'lidar:dsm', 'lidar:dtm'], render: 'rgb', pad: 0, partial: true,
+  sharpen: { keys: ['s2:nir', 's2:red', 's2:green'], params: DEFAULT_UNMIX },
+  channels: (['nir', 'red', 'green'] as const).map(a => band(a, 's2', 'u:')),
+  note: 'Sentinel-2 false colour unmixed by LiDAR height class: each 1 m pixel takes the spectrum of its height class (ground, shrub, canopy) in its neighbourhood, and every 10 m pixel still averages to what Sentinel-2 measured. From zoom 15.',
+});
+
 /** A custom fusion composite: any three variables as red, green and blue. */
 export function customFusionProduct(ids: [string, string, string]): Product {
   const vars = ids.map(id => variableById.get(id)!);
   return {
     id: `fusion-custom:${ids.join(',')}`, label: 'Custom fusion RGB', group: 'Fusion composites',
-    inputs: [...new Set(vars.flatMap(v => v.inputs))], render: 'rgb', pad: 0, partial: true,
+    inputs: [...new Set(vars.flatMap(v => v.inputs))], render: 'rgb', pad: 0, partial: true, sharpen: sharpeningFor(vars),
     channels: vars.map(v => ({ ...v.channel, label: v.label })),
     note: `Red = ${vars[0].label}, green = ${vars[1].label}, blue = ${vars[2].label}.`,
   };

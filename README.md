@@ -37,6 +37,30 @@ the balanced accuracy of its best single cut, with each label's mean ± sd and C
 pair of rules, restricted to the canopy height the samples were taken in. These are training figures on your samples.
 They describe those samples, not the map.
 
+## LiDAR sharpening (spectral unmixing by height class)
+
+A 10 m Sentinel-2 pixel is a mixture, and the 1 m canopy height model gives its proportions: so much ground (< 1 m),
+so much shrub (1–5 m), so much canopy (≥ 5 m). Over a small neighbourhood of Sentinel pixels (5 × 5 by default), each
+pixel's reflectance is modelled as the share-weighted sum of one spectrum per height class. Those spectra are solved by
+ridge-regularised least squares, and each 1 m pixel then takes the spectrum of its own height class. Finally each Sentinel
+pixel's residual is added back, so the sharpened image averages to exactly what Sentinel-2 measured (`src/unmix.ts`, tested on
+synthetic mixtures). Every imagery variable has a **· sharpened** twin for rules, composites and samples, and there is a
+**LiDAR-sharpened false colour** product.
+
+What it does and does not do: it resolves mixtures of **height classes**, so edges follow the canopy, roads, verges
+and shorelines at 1 m. It cannot split a pixel that is all one height class: 10 m of continuous canopy stays one
+spectrum, so broadleaf and conifer within closed canopy are still decided at 10 m. Trees and roofs share the tall class.
+It applies from about zoom 15, where a Sentinel pixel spans several screen pixels.
+
+## Conifer index (FieldMapper method)
+
+Ported from FieldMapper's `conifer_index` (`lib/habitat/models/landcover.ts`). Each line of evidence becomes a robust
+z-score over the woody pixels in view (canopy ≥ 3 m, NDVI ≥ 0.4), signed so that positive means needle-leaved, and the
+scores are averaged by weight. Otsu places the split, and Sarle's bimodality coefficient (above ~0.555) says whether there
+are really two groups. The point-cloud terms (laser intensity, canopy attenuation) are not available from HRDEM rasters,
+so the terms are Sentinel-2's: − NIR 0.35 · − visible brightness 0.20 · − excess green 0.15, plus − ΔNDVI 0.35 and
++ leaf-off NDVI 0.20 with a leaf-off scene. Calibrate in each area. Four variants: one or two scenes, raw or sharpened.
+
 ## How it draws
 
 One engine (`src/engine.ts`) draws every product. A product (`src/products.ts`) names its inputs and computes each

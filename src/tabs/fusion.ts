@@ -14,17 +14,19 @@
 
 import type { GeoJSONSource, MapMouseEvent } from 'maplibre-gl';
 import { h, clear, fmtDate } from '../dom.ts';
-import { samplePoint, viewStats } from '../engine.ts';
+import { samplePoint, sampleView, viewStats } from '../engine.ts';
 import { hideLayer, restyle, updateLayer } from '../mapLayers.ts';
 import {
-  FUSION_PRODUCTS, FUSION_VARIABLES, customFusionProduct, defaultStyle, needsLeafOff, variableById,
+  FUSION_PRODUCTS, FUSION_VARIABLES, customFusionProduct, defaultStyle, needsLeafOff, sharpeningFor, variableById,
   type Product, type ProductStyle, type Variable,
 } from '../products.ts';
 import {
-  OPS, PRESETS, clonePreset, compileRuleSet, parseRuleSet, usesLeafOff,
+  OPS, PRESETS, clonePreset, compileRuleSet, parseRuleSet, ruleVariables, usesLeafOff,
   type Condition, type Op, type Rule, type RuleSet,
 } from '../rules.ts';
 import { compareLabels, niceThreshold, type Sample } from '../compare.ts';
+import { CI_VARIANTS, calibrate, calibrations, ciInputs, type Calibration } from '../coniferIndex.ts';
+import { DEFAULT_UNMIX } from '../unmix.ts';
 import { resolveInputs } from '../sources.ts';
 import { searchS2, type HrdemItem, type S2Item } from '../stac.ts';
 import { stretchPanel, type StretchPanel } from '../ui/stretch.ts';
@@ -48,6 +50,15 @@ function variableOptions(selected: string, leafOff: boolean) {
 
 export function initFusion(ctx: Ctx) {
   const { map, say } = ctx;
+  // Which panels are open survives a re-render: the whole tab is rebuilt on
+  // every change, and a panel that folds itself shut under the hand that is
+  // using it reads as the control having failed.
+  const openPanels = new Map<string, boolean>();
+  const panelEl = (key: string, title: string, defaultOpen: boolean) => {
+    const d = h('details', { class: 'panel', open: openPanels.get(key) ?? defaultOpen }, h('summary', {}, title));
+    d.addEventListener('toggle', () => openPanels.set(key, d.open));
+    return d;
+  };
   const el = document.getElementById('fusion-body')!;
   const pane = document.getElementById('pane-fusion')!;
 
@@ -55,7 +66,9 @@ export function initFusion(ctx: Ctx) {
   let sceneId: string | null = null;
   let offId = '';
   let leafOffScenes: S2Item[] = [];
-  let mode: 'fusion-sgw' | 'custom' | 'rules' = 'rules';
+  let mode: 'fusion-sgw' | 'fusion-sharp-fcir' | 'custom' | 'rules' = 'rules';
+  let ciVariant = 'ci';
+  let ciReport: Calibration | null = null;
   let custom: [string, string, string] = ['chm', 'ndvi', 'swir16'];
   let rules: RuleSet = (() => { try { return parseRuleSet(load(LS_RULES, null)); } catch { return clonePreset(0); } })();
   let opacity = 1;
@@ -153,7 +166,7 @@ export function initFusion(ctx: Ctx) {
   async function valuesAt(lon: number, lat: number) {
     const vars = availableVariables();
     const sources = resolveInputs([...new Set(vars.flatMap(v => v.inputs))], items());
-    return samplePoint(sources, lon, lat, Object.fromEntries(vars.map(v => [v.id, v.channel.fn])), defaultStyle(FUSION_PRODUCTS[0]));
+    return samplePoint(sources, lon, lat, Object.fromEntries(vars.map(v => [v.id, v.channel.fn])), defaultStyle(FUSION_PRODUCTS[0]), 2, sharpeningFor(vars, rules.sharpen ?? DEFAULT_UNMIX));
   }
 
   const saveSamples = () => { save(LS_SAMPLES, { labels, samples }); paintSamples(); };
@@ -207,6 +220,61 @@ export function initFusion(ctx: Ctx) {
     say(`Added "${labels[0]}" and "${labels[1]}" rules on ${variableById.get(v)?.label} at ${t}.`);
   }
 
+  // ── Conifer index ─────────────────────────────────────────────────────────
+
+  /** Calibrate the chosen conifer-index variant on the woody pixels in view (FieldMapper's method). */
+  async function calibrateCi() {
+    const v = CI_VARIANTS.find(x => x.id === ciVariant)!;
+    if (v.options.leafOff && !offScene()) { say('This variant needs a leaf-off scene.', 'error'); return; }
+    if (!lidar() || !scene()) { say('Choose a LiDAR source and a scene first.', 'error'); return; }
+    say(`Calibrating ${v.label} on the woody pixels in view…`);
+    try {
+      const { inputs, sharpenKeys } = ciInputs(v.options);
+      const sources = resolveInputs(inputs, items());
+      const { planes, n } = await sampleView(sources, ctx.viewBox(), sharpenKeys.length ? { keys: sharpenKeys, params: rules.sharpen ?? DEFAULT_UNMIX } : undefined);
+      const cal = calibrate(planes, n, v.options);
+      if (!cal) { say('Too few woody pixels (canopy ≥ 3 m, NDVI ≥ 0.4) in view to calibrate. Move to a forested area.', 'error'); return; }
+      calibrations.set(v.id, cal);
+      ciReport = cal;
+      render();
+      // Repaint only if what is on the map reads this index — and say the
+      // calibration AFTER the redraw, or the redraw's own line replaces it.
+      const usesIt = (mode === 'rules' && ruleVariables(rules).some(x => x.id === v.id)) || (mode === 'custom' && custom.includes(v.id));
+      if (shown && usesIt) await draw(false);
+      say(`${v.label} calibrated on ${cal.woodyPixels.toLocaleString()} woody pixels: split at ${cal.threshold.toFixed(2)} z, bimodality ${Number.isFinite(cal.bimodality) ? cal.bimodality.toFixed(2) : 'n/a'}.`);
+    } catch (e) { say(`Could not calibrate: ${(e as Error).message}`, 'error'); }
+  }
+
+  function renderConiferIndex() {
+    const wrap = panelEl('ci', 'Conifer index (FieldMapper method)', !!ciReport);
+    wrap.append(h('p', { class: 'muted small' }, 'Each line of evidence becomes a robust z-score over the woody pixels in view (canopy ≥ 3 m, NDVI ≥ 0.4), signed so positive means needle-leaved, and averaged by weight; Otsu places the split. Calibrate in each new area: the index describes contrasts within the view, not absolute values.'));
+    wrap.append(h('div', { class: 'row' },
+      h('select', { class: 'grow', 'aria-label': 'Conifer index variant', onchange: (e: Event) => { ciVariant = (e.target as HTMLSelectElement).value; ciReport = calibrations.get(ciVariant) ?? null; render(); } },
+        ...CI_VARIANTS.map(v => h('option', { value: v.id, selected: v.id === ciVariant, disabled: v.options.leafOff && !offScene() }, v.label + (v.options.leafOff && !offScene() ? ' (needs leaf-off)' : '')))),
+      h('button', { class: 'btn small-btn', onclick: () => void calibrateCi() }, 'Calibrate to this view')));
+    const cal = ciReport && calibrations.get(ciVariant) === ciReport ? ciReport : null;
+    if (cal) {
+      const tw = cal.terms.reduce((a, t) => a + t.weight, 0);
+      wrap.append(h('table', { class: 'cmp' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Term'), h('th', {}, 'Weight'), h('th', {}, 'Woody median'), h('th', {}, 'Scale'))),
+        h('tbody', {}, ...cal.terms.map(t => h('tr', {}, h('td', {}, `${t.sign > 0 ? '+' : '−'} ${t.label}`), h('td', {}, (t.weight / tw).toFixed(2)), h('td', {}, t.median.toFixed(3)), h('td', {}, t.scale.toFixed(3)))))));
+      const bi = cal.bimodality;
+      wrap.append(h('p', { class: 'small' },
+        `${cal.woodyPixels.toLocaleString()} woody pixels · Otsu split at ${cal.threshold.toFixed(2)} z · ${Math.round(cal.coniferShare * 100)} % on the coniferous side · bimodality ${Number.isFinite(bi) ? bi.toFixed(2) : 'n/a'}: `,
+        h('strong', {}, bi > 0.555 ? 'two groups are plausible here.' : 'no clear second group — the split is weak; treat the classes as a gradient.')));
+    }
+    wrap.append(h('button', { class: 'chip', onclick: () => {
+      if (rules.rules.length && !confirm('Replace your rules with the conifer-index preset?')) return;
+      const preset = clonePreset(PRESETS.findIndex(p => p.name.startsWith('Forest type — conifer index')));
+      preset.rules.forEach(r => r.when.forEach(c => { if (c.v === 'ci') c.v = ciVariant; }));
+      preset.name = `Forest type — ${CI_VARIANTS.find(v => v.id === ciVariant)!.label}`;
+      rules = preset; mode = 'rules'; rulesChanged(false); render();
+      if (!calibrations.get(ciVariant)) say('Rules loaded. Press "Calibrate to this view" before drawing.');
+      else void draw(false);
+    } }, 'Use as rules (conifer ≥ 0.25 · mixed · broadleaf ≤ −0.25)'));
+    return wrap;
+  }
+
   // ── Rendering ─────────────────────────────────────────────────────────────
 
   function renderInputs() {
@@ -223,12 +291,26 @@ export function initFusion(ctx: Ctx) {
   }
 
   function renderRuleEditor() {
-    const wrap = h('details', { class: 'panel', open: true }, h('summary', {}, 'Rules'));
+    const wrap = panelEl('rules', 'Rules', true);
     const presetSel = h('select', { 'aria-label': 'Preset' }, ...PRESETS.map((p, i) => h('option', { value: String(i) }, p.name)));
     wrap.append(h('div', { class: 'row' }, presetSel,
       h('button', { class: 'btn ghost small-btn', onclick: () => { if (rules.rules.length && !confirm('Replace your rules with this preset?')) return; rules = clonePreset(+presetSel.value); rulesChanged(); render(); } }, 'Load preset')));
     wrap.append(h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: rules.maskClouds, onchange: (e: Event) => { rules.maskClouds = (e.target as HTMLInputElement).checked; rulesChanged(); } }), 'Mask cloud, shadow and snow (Sentinel-2 SCL)'));
     if (usesLeafOff(rules) && !offScene()) wrap.append(h('p', { class: 'note small' }, 'These rules use leaf-off variables: choose a leaf-off scene above, or they cannot be drawn.'));
+    if (ruleVariables(rules).some(v => v.sharpenKeys)) {
+      const sp = rules.sharpen ?? { ...DEFAULT_UNMIX };
+      const set = (patch: Partial<typeof sp>) => { rules.sharpen = { ...sp, ...patch }; rulesChanged(); };
+      wrap.append(h('div', { class: 'note small' },
+        h('strong', {}, 'LiDAR sharpening. '),
+        'Sharpened variables are unmixed by canopy height class: ',
+        h('input', { type: 'number', step: '0.5', value: String(sp.breaks[0]), 'aria-label': 'First height break (m)', style: 'width:56px', onchange: (e: Event) => set({ breaks: [+(e.target as HTMLInputElement).value, sp.breaks[1] ?? 5].sort((a, b) => a - b) }) }),
+        ' and ',
+        h('input', { type: 'number', step: '0.5', value: String(sp.breaks[1] ?? 5), 'aria-label': 'Second height break (m)', style: 'width:56px', onchange: (e: Event) => set({ breaks: [sp.breaks[0], +(e.target as HTMLInputElement).value].sort((a, b) => a - b) }) }),
+        ' m, over ',
+        h('select', { 'aria-label': 'Neighbourhood', onchange: (e: Event) => set({ radius: +(e.target as HTMLSelectElement).value }) },
+          ...[1, 2, 3, 4].map(r => h('option', { value: String(r), selected: r === sp.radius }, `${(2 * r + 1) * 10} m`))),
+        ' neighbourhoods. Applies from zoom 15, where a Sentinel pixel spans several screen pixels; below it the original values are shown.'));
+    }
 
     rules.rules.forEach((r, i) => {
       const card = h('div', { class: `rule${r.off ? ' rule-off' : ''}` });
@@ -273,7 +355,7 @@ export function initFusion(ctx: Ctx) {
   }
 
   function renderSamples() {
-    const wrap = h('details', { class: 'panel', open: samples.length > 0 || !!sampling }, h('summary', {}, `Compare samples (${samples.length})`));
+    const wrap = panelEl('samples', `Compare samples (${samples.length})`, samples.length > 0 || !!sampling);
     wrap.append(h('p', { class: 'muted small' }, 'Tap points of two kinds on the map (crowns, not gaps) to see which variables tell them apart here. Values are averaged over ±2 m.'));
     wrap.append(h('div', { class: 'row' }, ...labels.map((lab, k) => h('input', {
       type: 'text', value: lab, class: 'grow', 'aria-label': `Label ${k + 1}`, style: `border-left: 6px solid ${SAMPLE_COLOURS[k]}`,
@@ -318,6 +400,7 @@ export function initFusion(ctx: Ctx) {
     el.append(h('label', { class: 'field' }, 'Product', h('select', { onchange: (e: Event) => { mode = (e.target as HTMLSelectElement).value as typeof mode; if (shown) void draw(true); else render(); } },
       h('option', { value: 'rules', selected: mode === 'rules' }, 'Rule-based classes (editable)'),
       h('option', { value: 'fusion-sgw', selected: mode === 'fusion-sgw' }, FUSION_PRODUCTS[0].label),
+      h('option', { value: 'fusion-sharp-fcir', selected: mode === 'fusion-sharp-fcir' }, FUSION_PRODUCTS.find(p => p.id === 'fusion-sharp-fcir')!.label),
       h('option', { value: 'custom', selected: mode === 'custom' }, 'Custom fusion RGB…'))));
 
     if (mode === 'custom') {
@@ -332,11 +415,14 @@ export function initFusion(ctx: Ctx) {
     if (shown && product && panel) {
       const s = scene(), l = lidar(), o = offScene();
       if (s && l) el.append(h('p', { class: 'note small' }, `LiDAR ${l.datetime ? fmtDate(l.datetime) : '(undated)'} · leaf-on ${fmtDate(s.datetime)}${o ? ` · leaf-off ${fmtDate(o.datetime)}` : ''}. Anything built, cleared or grown between the dates reads wrongly, and the imagery is 10–20 m against the LiDAR's 1 m.`));
-      el.append(h('details', { class: 'panel', open: true }, h('summary', {}, product.render === 'classes' ? 'Classes (share of this view)' : 'Stretch'), panel.el,
-        product.render === 'classes' ? h('button', { class: 'chip', onclick: () => void panel?.refresh() }, 'Recount this view') : null));
+      const legendPanel = panelEl('legend', product.render === 'classes' ? 'Classes (share of this view)' : 'Stretch', true);
+      legendPanel.append(panel.el);
+      if (product.render === 'classes') legendPanel.append(h('button', { class: 'chip', onclick: () => void panel?.refresh() }, 'Recount this view'));
+      el.append(legendPanel);
       el.append(h('label', { class: 'row' }, 'Opacity', h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(opacity), oninput: (e: Event) => { opacity = +(e.target as HTMLInputElement).value; if (map.getLayer(LAYER)) map.setPaintProperty(LAYER, 'raster-opacity', opacity); } })),
         h('button', { class: 'btn ghost small-btn', onclick: () => { hideLayer(map, LAYER); shown = false; panel = null; render(); } }, 'Remove from map'));
     }
+    el.append(renderConiferIndex());
     el.append(renderSamples());
   }
 

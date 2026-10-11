@@ -42,9 +42,10 @@ test('indices are computed on reflectance and clamped to −1..1', () => {
 });
 
 test('every product reads only the inputs it declares', () => {
-  const all = [...IMAGERY_PRODUCTS, ...RASTER_PRODUCTS, ...FUSION_PRODUCTS, customFusionProduct(['chm', 'evi', 'swir22'])];
+  const all = [...IMAGERY_PRODUCTS, ...RASTER_PRODUCTS, ...FUSION_PRODUCTS, customFusionProduct(['chm', 'evi', 'swir22']), customFusionProduct(['s_ndvi', 's_d_ndvi', 'ci'])];
   for (const prod of all) {
-    const p: Planes = new Proxy({}, { get: (_, k) => { assert.ok(prod.inputs.includes(String(k)), `${prod.id} read undeclared ${String(k)}`); return Float32Array.of(0.2); } });
+    const sharp = new Set((prod.sharpen?.keys ?? []).map(k => `u:${k}`));
+    const p: Planes = new Proxy({}, { get: (_, k) => { assert.ok(prod.inputs.includes(String(k)) || sharp.has(String(k)), `${prod.id} read undeclared ${String(k)}`); return Float32Array.of(0.2); } });
     for (const c of prod.channels) c.fn(p, 0, defaultStyle(prod));
   }
 });
