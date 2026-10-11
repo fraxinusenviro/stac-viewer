@@ -21,7 +21,7 @@ interface StacFeature {
   bbox?: number[];
   geometry?: GeoJSON.Geometry;
   properties?: Record<string, unknown>;
-  assets?: Record<string, { href?: string }>;
+  assets?: Record<string, { href?: string; 'raster:bands'?: { scale?: number; offset?: number; nodata?: number }[] }>;
 }
 
 export interface HrdemItem {
@@ -38,6 +38,35 @@ export interface HrdemItem {
   geometry: GeoJSON.Geometry | null;
 }
 
+export interface S2Asset {
+  href: string;
+  scale: number;
+  offset: number;
+  nodata: number | null;
+  /** Where scale/offset came from: the item's own raster:bands, or the baseline rule. */
+  from: 'stac' | 'baseline' | 'none';
+}
+
+/** Reflectance assets (uint16 DN; reflectance = DN × scale + offset). */
+const REFLECTANCE = new Set(['coastal', 'blue', 'green', 'red', 'rededge1', 'rededge2', 'rededge3', 'nir', 'nir08', 'nir09', 'swir16', 'swir22']);
+
+/**
+ * How one asset's DN becomes a value. The item's own `raster:bands` wins.
+ * Without it, a reflectance band takes 0.0001 and the BOA offset ESA adds
+ * from processing baseline 04.00 (January 2022): DN = 10000 ρ + 1000, so
+ * offset −0.1. A row with no baseline gets no offset. Pure.
+ */
+export function s2AssetScaling(key: string, rb: { scale?: number; offset?: number; nodata?: number } | undefined, baseline: string | null): Omit<S2Asset, 'href'> {
+  if (rb && (rb.scale !== undefined || rb.offset !== undefined)) {
+    return { scale: rb.scale ?? 1, offset: rb.offset ?? 0, nodata: rb.nodata ?? 0, from: 'stac' };
+  }
+  if (REFLECTANCE.has(key)) {
+    const b = baseline ? parseFloat(baseline) : NaN;
+    return { scale: 0.0001, offset: Number.isFinite(b) && b >= 4 ? -0.1 : 0, nodata: rb?.nodata ?? 0, from: Number.isFinite(b) ? 'baseline' : 'none' };
+  }
+  return { scale: 1, offset: 0, nodata: rb?.nodata ?? 0, from: 'stac' };
+}
+
 export interface S2Item {
   id: string;
   datetime: string;
@@ -46,6 +75,10 @@ export interface S2Item {
   nodata: number | null;
   mgrs: string | null;
   visual: string;
+  /** Processing baseline (`s2:processing_baseline`), e.g. "05.13". */
+  baseline: string | null;
+  /** Every COG asset, with how its DN becomes a value. */
+  assets: Record<string, S2Asset>;
   thumbnail: string | null;
   bbox: LonLatBox | null;
   geometry: GeoJSON.Geometry | null;
@@ -82,11 +115,17 @@ export function parseS2(json: unknown): S2Item[] {
     const visual = f.assets?.visual?.href;
     const dt = f.properties?.datetime as string | undefined;
     if (!visual || !dt) continue;
+    const baseline = (f.properties?.['s2:processing_baseline'] as string | undefined) ?? null;
+    const assets: Record<string, S2Asset> = {};
+    for (const [k, a] of Object.entries(f.assets ?? {})) {
+      if (!a.href || !/\.tif$/i.test(a.href)) continue;
+      assets[k] = { href: a.href, ...s2AssetScaling(k, a['raster:bands']?.[0], baseline) };
+    }
     out.push({
       id: f.id, datetime: dt, cloud: num(f.properties?.['eo:cloud_cover']),
       nodata: num(f.properties?.['s2:nodata_pixel_percentage']),
       mgrs: (f.properties?.['grid:code'] as string | undefined)?.replace(/^MGRS-/, '') ?? null,
-      visual, thumbnail: f.assets?.thumbnail?.href ?? null, bbox: box(f.bbox), geometry: f.geometry ?? null,
+      visual, baseline, assets, thumbnail: f.assets?.thumbnail?.href ?? null, bbox: box(f.bbox), geometry: f.geometry ?? null,
     });
   }
   return out.sort((a, b) => b.datetime.localeCompare(a.datetime));

@@ -34,3 +34,25 @@ test('coverageTouches: inside, overlapping, in a hole, and outside', () => {
   assert.equal(coverageTouches(donut, [20, 20, 21, 21]), false, 'far away');
   assert.equal(coverageTouches({ type: 'MultiPolygon', coordinates: [[sq(30, 30, 31, 31)], [sq(0, 0, 1, 1)]] }, [0.2, 0.2, 0.4, 0.4]), true, 'second part');
 });
+
+import { s2AssetScaling } from '../src/stac.ts';
+import { resolveInputs } from '../src/sources.ts';
+
+test('s2AssetScaling: STAC raster:bands wins; else the baseline rule', () => {
+  assert.deepEqual(s2AssetScaling('red', { scale: 0.0001, offset: -0.1, nodata: 0 }, '05.13'), { scale: 0.0001, offset: -0.1, nodata: 0, from: 'stac' });
+  assert.equal(s2AssetScaling('red', undefined, '04.00').offset, -0.1);
+  assert.equal(s2AssetScaling('red', undefined, '02.09').offset, 0);
+  assert.equal(s2AssetScaling('red', undefined, null).from, 'none');
+  assert.equal(s2AssetScaling('scl', undefined, '05.13').scale, 1);
+});
+
+test('resolveInputs maps product inputs to files, and names what is missing', () => {
+  const s2 = { assets: { nir: { href: 'n.tif', scale: 0.0001, offset: -0.1, nodata: 0, from: 'stac' as const } }, visual: 'v.tif' } as never;
+  const lidar = { id: 'P', dtm: 't.tif', dsm: null } as never;
+  const r = resolveInputs(['s2:nir', 'lidar:dtm'], s2, lidar);
+  assert.equal(r['s2:nir'].url, 'n.tif'); assert.equal(r['s2:nir'].offset, -0.1);
+  assert.equal(r['lidar:dtm'].nodata, -32767);
+  assert.throws(() => resolveInputs(['lidar:dsm'], s2, lidar), /no DSM/);
+  assert.throws(() => resolveInputs(['s2:red'], s2, lidar), /no red/);
+  assert.equal(resolveInputs(['s2:nir'], s2, null, { nodataAuto: false })['s2:nir'].nodata, null);
+});

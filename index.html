@@ -12,12 +12,13 @@
     <aside id="side">
       <header>
         <h1>STAC Viewer</h1>
-        <p class="muted small">LiDAR point clouds and rasters, and satellite imagery, straight from public cloud storage.</p>
+        <p class="muted small">LiDAR point clouds and rasters, satellite imagery, and their fusion, straight from public cloud storage.</p>
       </header>
       <nav class="tabs" role="tablist">
         <button class="tab" role="tab" data-tab="pc" aria-selected="true">Point clouds</button>
         <button class="tab" role="tab" data-tab="raster" aria-selected="false">Rasters</button>
         <button class="tab" role="tab" data-tab="img" aria-selected="false">Imagery</button>
+        <button class="tab" role="tab" data-tab="fusion" aria-selected="false">Fusion</button>
       </nav>
 
       <section class="pane" id="pane-pc">
@@ -34,15 +35,20 @@
       </section>
 
       <section class="pane" id="pane-img" hidden>
-        <p class="muted small">Sentinel-2 Level-2A true colour, from Element 84 Earth Search.</p>
+        <p class="muted small">Sentinel-2 Level-2A from Element 84 Earth Search: band combinations, vegetation and water indices, scene classes.</p>
+        <div id="img-controls"></div>
         <div class="form">
           <label>From <input id="img-from" type="date"></label>
           <label>To <input id="img-to" type="date"></label>
           <label class="row">Max cloud <input id="img-cloud" type="range" min="0" max="100" step="5" value="30"> <output id="img-cloud-out">30%</output></label>
-          <label class="row">Opacity <input id="img-opacity" type="range" min="0" max="1" step="0.05" value="1"></label>
         </div>
         <button id="img-search" class="btn wide">Search this view</button>
         <div id="img-list" class="list"></div>
+      </section>
+
+      <section class="pane" id="pane-fusion" hidden>
+        <p class="muted small">LiDAR structure and Sentinel-2 spectra fused per pixel, for reading land cover: canopy height tells trees from grass and roofs from roads; the indices tell green from grey and water from shadow.</p>
+        <div id="fusion-body"></div>
       </section>
 
       <footer>

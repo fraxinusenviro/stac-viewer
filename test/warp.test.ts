@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import proj4 from 'proj4';
 import { projDef } from '../src/crs.ts';
-import { chooseLevel, controlGrid, hillshade, interpGrid, tileBounds, tileToLonLat, TILE } from '../src/warp.ts';
+import { boxGrid, chooseLevel, controlGrid, hillshade, interpGrid, tileBounds, tileGrid, tileToLonLat, TILE } from '../src/warp.ts';
 
 test('tile 0/0/0 spans the Web Mercator world', () => {
   const [w, s, e, n] = tileBounds(0, 0, 0);
@@ -15,7 +15,7 @@ test('the interpolated control grid stays within a tenth of a source pixel of ex
   const toSrc = (p: [number, number]) => conv.forward(p) as [number, number];
   const geo = { originX: 399960, originY: 5000040, resX: 10, resY: -10 };
   const [z, x, y] = [14, 5306, 5880]; // over Halifax
-  const g = controlGrid(z, x, y, 0, toSrc, geo);
+  const g = controlGrid(tileGrid(z, x, y), toSrc, geo);
   const out: [number, number] = [0, 0];
   let worst = 0;
   for (const [px, py] of [[7.5, 3.5], [100.5, 200.5], [255.5, 255.5], [128, 9]]) {
@@ -47,4 +47,16 @@ test('projDef refuses a code it does not define', () => {
   assert.equal(projDef('EPSG:99999'), null);
   assert.match(projDef('EPSG:2961')!, /zone=20/);
   assert.match(projDef(3979)!, /lcc/);
+});
+
+test('boxGrid runs west to east and north to south', () => {
+  const g = boxGrid([-64, 44, -63, 45], 100, 50);
+  assert.deepEqual(g.lonLat(0, 0), [-64, 45]);
+  assert.deepEqual(g.lonLat(100, 50), [-63, 44]);
+});
+
+test('a padded tile grid puts the pad outside the tile', () => {
+  const g = tileGrid(3, 2, 2, 1);
+  assert.equal(g.w, TILE + 2);
+  assert.deepEqual(g.lonLat(1, 1), tileToLonLat(2, 2, 3));
 });
