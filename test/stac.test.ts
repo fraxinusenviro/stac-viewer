@@ -49,10 +49,12 @@ test('s2AssetScaling: STAC raster:bands wins; else the baseline rule', () => {
 test('resolveInputs maps product inputs to files, and names what is missing', () => {
   const s2 = { assets: { nir: { href: 'n.tif', scale: 0.0001, offset: -0.1, nodata: 0, from: 'stac' as const } }, visual: 'v.tif' } as never;
   const lidar = { id: 'P', dtm: 't.tif', dsm: null } as never;
-  const r = resolveInputs(['s2:nir', 'lidar:dtm'], s2, lidar);
+  const r = resolveInputs(['s2:nir', 'lidar:dtm'], { s2, lidar });
   assert.equal(r['s2:nir'].url, 'n.tif'); assert.equal(r['s2:nir'].offset, -0.1);
   assert.equal(r['lidar:dtm'].nodata, -32767);
-  assert.throws(() => resolveInputs(['lidar:dsm'], s2, lidar), /no DSM/);
-  assert.throws(() => resolveInputs(['s2:red'], s2, lidar), /no red/);
-  assert.equal(resolveInputs(['s2:nir'], s2, null, { nodataAuto: false })['s2:nir'].nodata, null);
+  assert.throws(() => resolveInputs(['lidar:dsm'], { s2, lidar }), /no DSM/);
+  assert.throws(() => resolveInputs(['s2:red'], { s2, lidar }), /no red/);
+  assert.throws(() => resolveInputs(['s2b:nir'], { s2, lidar }), /leaf-off scene/);
+  assert.equal(resolveInputs(['s2b:nir'], { s2b: s2 })['s2b:nir'].url, 'n.tif');
+  assert.equal(resolveInputs(['s2:nir'], { s2 }, { nodataAuto: false })['s2:nir'].nodata, null);
 });

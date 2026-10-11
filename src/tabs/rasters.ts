@@ -98,7 +98,7 @@ export function initRasters(ctx: Ctx) {
     say(`Opening ${itemName(it)}…`);
     try {
       const style = defaultStyle(p);
-      await showLayer(map, id, { product: p, sources: resolveInputs(p.inputs, null, it), style }, ANCHOR.rasters);
+      await showLayer(map, id, { product: p, sources: resolveInputs(p.inputs, { lidar: it }), style }, ANCHOR.rasters);
       const L: RasterLayer = { id, item: it, product: p, style, opacity: 1, panel: null };
       if (hasStretch(p)) {
         L.panel = stretchPanel({ product: p, style, stats: () => viewStats(id, ctx.viewBox()), apply: () => restyle(map, id, style) });

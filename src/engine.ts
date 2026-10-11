@@ -21,7 +21,7 @@ import proj4 from 'proj4';
 import { fromUrl, type GeoTIFF, type GeoTIFFImage } from 'geotiff';
 import { projDef } from './crs.ts';
 import { paint, channelStats, classCounts, type ChannelStats } from './paint.ts';
-import { paintSpec, type Planes, type Product, type ProductStyle } from './products.ts';
+import { paintSpec, type ChannelFn, type Planes, type Product, type ProductStyle } from './products.ts';
 import {
   TILE, boxGrid, chooseLevel, controlGrid, gridWindow, interpGrid, metresPerPixel, tileBounds, tileGrid,
   type Geo, type LonLatBox, type OutGrid,
@@ -295,4 +295,25 @@ export async function viewStats(id: string, box: LonLatBox): Promise<ViewStats |
     return { channels: [null], classes: new Map([...counts].map(([k, c]) => [k, total ? c / total : 0])) };
   }
   return { channels: chan.map((v, c) => channelStats(v, L.product.channels[c].domain)) };
+}
+
+// ── Point samples ───────────────────────────────────────────────────────────
+
+/**
+ * The mean of each function over a small square (default ±2 m, a 5 × 5 grid)
+ * around a point, read at full resolution — the values behind one sample
+ * tapped on the map. Averaging over a few metres keeps a 1 m canopy height
+ * from landing in the gap between two crowns. NaN where nothing was finite.
+ */
+export async function samplePoint(sources: Record<string, InputSource>, lon: number, lat: number, fns: Record<string, ChannelFn>, style: ProductStyle, radiusM = 2): Promise<Record<string, number>> {
+  const dLat = radiusM / 111320, dLon = radiusM / (111320 * Math.cos((lat * Math.PI) / 180));
+  const n = 5;
+  const planes = await samplePlanes(sources, boxGrid([lon - dLon, lat - dLat, lon + dLon, lat + dLat], n, n));
+  const out: Record<string, number> = {};
+  for (const [k, fn] of Object.entries(fns)) {
+    let sum = 0, cnt = 0;
+    for (let i = 0; i < n * n; i++) { const v = fn(planes, i, style); if (Number.isFinite(v)) { sum += v; cnt++; } }
+    out[k] = cnt ? sum / cnt : NaN;
+  }
+  return out;
 }

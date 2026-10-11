@@ -33,3 +33,18 @@ export function hideLayer(map: MlMap, id: string) {
   if (map.getSource(id)) map.removeSource(id);
   removeLayer(id);
 }
+
+/**
+ * Swap a layer's definition in place: the MapLibre source stays, only its
+ * tile URL version moves. When the inputs are unchanged (a rule edit, a new
+ * threshold) the engine's plane cache answers every tile — no flash, no
+ * re-download. Draws it fresh when it is not on the map yet.
+ */
+export async function updateLayer(map: MlMap, id: string, def: LayerDef, beforeId: string, opacity = 1) {
+  if (!map.getSource(id)) return showLayer(map, id, def, beforeId, opacity);
+  const bounds = await setLayer(id, def);
+  const v = (versions.get(id) ?? 0) + 1;
+  versions.set(id, v);
+  (map.getSource(id) as RasterTileSource).setTiles([tileUrl(id, v)]);
+  return bounds;
+}

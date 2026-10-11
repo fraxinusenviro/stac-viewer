@@ -16,17 +16,27 @@ export interface SourceOptions {
  * The InputSource for every input a product names, or an error naming the
  * first one these items cannot supply.
  */
-export function resolveInputs(inputs: string[], s2: S2Item | null, lidar: HrdemItem | null, opts: SourceOptions = { nodataAuto: true }): Record<string, InputSource> {
+export interface InputItems {
+  /** The Sentinel-2 scene (leaf-on, for fusion). */
+  s2?: S2Item | null;
+  /** The optional second, leaf-off scene. */
+  s2b?: S2Item | null;
+  lidar?: HrdemItem | null;
+}
+
+export function resolveInputs(inputs: string[], items: InputItems, opts: SourceOptions = { nodataAuto: true }): Record<string, InputSource> {
   const out: Record<string, InputSource> = {};
   for (const key of inputs) {
     const [kind, rest] = key.split(':');
-    if (kind === 's2') {
-      if (!s2) throw new Error('this product needs a Sentinel-2 scene');
+    if (kind === 's2' || kind === 's2b') {
+      const scene = kind === 's2' ? items.s2 : items.s2b;
+      if (!scene) throw new Error(kind === 's2' ? 'this product needs a Sentinel-2 scene' : 'this product needs a leaf-off scene');
       const [asset, sample] = rest.split('#');
-      const a = s2.assets[asset];
-      if (!a) throw new Error(`the scene has no ${asset} asset`);
+      const a = scene.assets[asset];
+      if (!a) throw new Error(`the ${kind === 's2b' ? 'leaf-off ' : ''}scene has no ${asset} asset`);
       out[key] = { url: a.href, sample: sample ? Number(sample) : 0, scale: a.scale, offset: a.offset, nodata: opts.nodataAuto ? a.nodata : null };
     } else if (kind === 'lidar') {
+      const lidar = items.lidar;
       if (!lidar) throw new Error('this product needs a LiDAR raster source');
       const href = rest === 'dsm' ? lidar.dsm : lidar.dtm;
       if (!href) throw new Error(`${lidar.id} has no ${rest.toUpperCase()}`);

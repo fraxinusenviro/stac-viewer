@@ -91,6 +91,24 @@ details.panel[open] > summary { margin-bottom: 6px; }
 .panel input[type=number] { width: 84px; }
 .on-map details { display: flex; flex-direction: column; gap: 6px; }
 
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.check input { flex: none; width: 18px; height: 18px; margin: 0; }
+.rule { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; }
+.rule-off { opacity: 0.5; }
+.rule-head { flex-wrap: nowrap; gap: 4px; }
+.rule-head input[type=text] { min-width: 0; }
+.rule-head input[type=color] { width: 32px; height: 30px; padding: 0 2px; flex: none; }
+.rule-n { width: 14px; font-size: 12px; text-align: right; flex: none; }
+.cond { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.cond select.grow { min-width: 0; max-width: 100%; flex: 1 1 150px; }
+.cond input[type=number] { width: 72px; }
+.icon { min-width: 30px; min-height: 30px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--text); cursor: pointer; flex: none; font-size: 13px; }
+.cmp-wrap { overflow-x: auto; }
+.cmp { border-collapse: collapse; font-size: 12px; width: 100%; font-variant-numeric: tabular-nums; }
+.cmp th, .cmp td { padding: 4px 4px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+.cmp th { color: var(--muted); font-weight: 600; }
+.cmp td:first-child { max-width: 120px; }
+
 @media (max-width: 760px) {
   #app { grid-template-columns: 1fr; grid-template-rows: 52dvh 1fr; }
   #side { order: 2; border-right: 0; border-top: 1px solid var(--line); }

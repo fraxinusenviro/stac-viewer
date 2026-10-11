@@ -91,7 +91,7 @@ export function initImagery(ctx: Ctx) {
     style = keepStyle ? style! : defaultStyle(p);
     say(`Opening ${fmtDate(scene.datetime)} · ${p.label}…`);
     try {
-      await showLayer(map, LAYER, { product: p, sources: resolveInputs(p.inputs, scene, null, { nodataAuto }), style }, ANCHOR.imagery, opacity, 16);
+      await showLayer(map, LAYER, { product: p, sources: resolveInputs(p.inputs, { s2: scene }, { nodataAuto }), style }, ANCHOR.imagery, opacity, 16);
       const st = style;
       panel = p.identity ? null : stretchPanel({ product: p, style: st, stats: () => viewStats(LAYER, ctx.viewBox()), apply: () => restyle(map, LAYER, st) });
       renderControls();

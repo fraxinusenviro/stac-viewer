@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_THRESHOLDS, FUSION_PRODUCTS, FUSION_VARIABLES, IMAGERY_PRODUCTS, INDICES, RASTER_PRODUCTS,
-  classifyPixel, customFusionProduct, defaultStyle, hasCurve, hasStretch, rasterProductsFor, seedRanges, type Planes,
+  FUSION_PRODUCTS, FUSION_VARIABLES, IMAGERY_PRODUCTS, INDICES, RASTER_PRODUCTS,
+  customFusionProduct, needsLeafOff, variableById, defaultStyle, hasCurve, hasStretch, rasterProductsFor, seedRanges, type Planes,
 } from '../src/products.ts';
 
 const planes = (o: Record<string, number[]>): Planes => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, Float32Array.from(v)]));
@@ -49,24 +49,6 @@ test('every product reads only the inputs it declares', () => {
   }
 });
 
-test('land cover rules: water, trees, shrub, low vegetation, structure, bare, masked', () => {
-  const t = DEFAULT_THRESHOLDS;
-  const px = (chm: number, ndvi: number, ndwi: number, nir = 0.3, scl?: number) => classifyPixel({ chm, ndvi, ndwi, nir, scl }, t);
-  assert.equal(px(0.2, -0.1, 0.4), 1);
-  assert.equal(px(15, 0.8, -0.6), 2);
-  assert.equal(px(2, 0.7, -0.5), 3);
-  assert.equal(px(0.3, 0.6, -0.5), 4);
-  assert.equal(px(8, 0.1, -0.1), 5);
-  assert.equal(px(0.1, 0.1, -0.1), 6);
-  assert.equal(px(15, 0.8, -0.6, 0.3, 9), 7);
-  assert.ok(Number.isNaN(px(NaN, 0.8, -0.6)));
-  // A tall object over water (a bridge, a wharf) is not water.
-  assert.equal(px(6, -0.1, 0.3), 5);
-  // Dark water: the indices are noise (NaN), the NIR is not.
-  assert.equal(px(0, NaN, NaN, 0.01), 1);
-  assert.ok(Number.isNaN(px(0, NaN, NaN, 0.2)));
-});
-
 test('seedRanges: fixed seeds stay, percentiles fill the rest, CHM starts at 0', () => {
   const chm = RASTER_PRODUCTS.find(p => p.id === 'chm')!;
   assert.deepEqual(seedRanges(chm, [[0, 1]], [{ p2: 3, p98: 22 }]), [[0, 22]]);
@@ -84,12 +66,13 @@ test('stretch and curve controls appear only where they mean something', () => {
   assert.equal(hasStretch(by('chm')), true);
   assert.equal(hasCurve(by('fcir')), true);
   assert.equal(hasCurve(by('ndvi')), false);
-  assert.equal(hasStretch(by('fusion-classes')), false);
 });
 
 test('fusion variables cover LiDAR, every index and the 10–20 m bands', () => {
   const ids = FUSION_VARIABLES.map(v => v.id);
-  for (const id of ['chm', 'dtm', 'dsm', ...INDICES.map(i => i.id), 'nir', 'swir16', 'rededge1']) assert.ok(ids.includes(id), id);
+  for (const id of ['chm', 'dtm', 'dsm', ...INDICES.map(i => i.id), 'nir', 'swir16', 'rededge1', 'ndvi_off', 'nir_off', 'd_ndvi', 'd_nir']) assert.ok(ids.includes(id), id);
+  assert.equal(needsLeafOff(variableById.get('d_ndvi')!), true);
+  assert.equal(needsLeafOff(variableById.get('ndvi')!), false);
   assert.ok(!ids.includes('coastal'), '60 m bands are left out');
 });
 
@@ -99,4 +82,11 @@ test('the composite water channel agrees with the classifier on dark water', () 
   const p = planes({ 's2:green': [0.004, 0.004], 's2:nir': [0.002, 0.2], 's2:red': [0.003, 0.1], 'lidar:dsm': [0, 0], 'lidar:dtm': [0, 0] });
   assert.equal(sgw.channels[2].fn(p, 0, s), 1);
   assert.ok(sgw.channels[2].fn(p, 1, s) < 0, 'a bright NIR pixel keeps its own NDWI');
+});
+
+test('ΔNDVI is leaf-on minus leaf-off NDVI', () => {
+  const v = variableById.get('d_ndvi')!;
+  const p = planes({ 's2:nir': [0.4], 's2:red': [0.04], 's2b:nir': [0.2], 's2b:red': [0.1] });
+  const on = (0.4 - 0.04) / 0.44, off = (0.2 - 0.1) / 0.3;
+  assert.ok(Math.abs(v.channel.fn(p, 0, defaultStyle(FUSION_PRODUCTS[0])) - (on - off)) < 1e-6);
 });

@@ -96,10 +96,13 @@ export const bandTitle = (asset: string) => {
   return b ? `${b.esa} ${b.label}${b.nm ? ` ${b.nm} nm` : ''} · ${b.res} m` : asset;
 };
 
-const band = (asset: string): Channel => ({
-  label: bandByAsset.get(asset)?.esa ?? asset, unit: 'reflectance', step: 0.001, seed: 'p2p98',
-  fn: (p, i) => p[`s2:${asset}`][i],
-});
+/** Which scene an input comes from: `s2` the (leaf-on) scene, `s2b` the optional second, leaf-off one. */
+export type Scene = 's2' | 's2b';
+
+const band = (asset: string, scene: Scene = 's2'): Channel => {
+  const key = `${scene}:${asset}`;
+  return { label: bandByAsset.get(asset)?.esa ?? asset, unit: 'reflectance', step: 0.001, seed: 'p2p98', fn: (p, i) => p[key][i] };
+};
 
 // ── Indices ─────────────────────────────────────────────────────────────────
 
@@ -138,8 +141,8 @@ const indexById = new Map(INDICES.map(x => [x.id, x]));
 export const MIN_INDEX_SIGNAL = 0.01;
 
 /** A channel computing an index per pixel from reflectance planes. */
-function indexChannel(ix: IndexDef, seed: Channel['seed'] = [-1, 1]): Channel {
-  const keys = ix.bands.map(b => [b, `s2:${b}`] as const);
+function indexChannel(ix: IndexDef, seed: Channel['seed'] = [-1, 1], scene: Scene = 's2'): Channel {
+  const keys = ix.bands.map(b => [b, `${scene}:${b}`] as const);
   const v: Record<string, number> = {};
   return {
     label: ix.label, unit: 'index', step: 0.01, domain: [-1, 1], seed,
@@ -162,7 +165,7 @@ function indexChannel(ix: IndexDef, seed: Channel['seed'] = [-1, 1]): Channel {
 
 const rgbProduct = (id: string, label: string, assets: [string, string, string], note: string): Product => ({
   id, label, group: 'Band combinations', inputs: [...new Set(assets)].map(a => `s2:${a}`),
-  render: 'rgb', channels: assets.map(band), pad: 0, note,
+  render: 'rgb', channels: assets.map(a => band(a)), pad: 0, note,
 });
 
 export const SCL_CLASSES: ClassDef[] = [
@@ -265,28 +268,36 @@ export function rasterProductsFor(item: { dsm: string | null }): Product[] {
 /** A variable a custom fusion channel can draw on. */
 export interface Variable { id: string; label: string; group: string; inputs: string[]; channel: Channel }
 
+const FUSION_BANDS = S2_BANDS.filter(b => b.res <= 20);
+
+/** On-minus-off: how much a variable FALLS between the leaf-on and the leaf-off scene. */
+function deltaVariable(id: string, label: string, on: Channel, off: Channel, inputs: string[]): Variable {
+  return {
+    id: `d_${id}`, label: `Δ ${label} (leaf-on − leaf-off)`, group: 'Seasonal change', inputs,
+    channel: { label: `Δ ${label}`, unit: on.unit, step: on.step, seed: 'p2p98', fn: (p, i, s) => on.fn(p, i, s) - off.fn(p, i, s) },
+  };
+}
+
 export const FUSION_VARIABLES: Variable[] = [
   { id: 'chm', label: 'Canopy height (DSM − DTM)', group: 'LiDAR', inputs: ['lidar:dsm', 'lidar:dtm'], channel: chmChannel },
   { id: 'dtm', label: 'Ground elevation (DTM)', group: 'LiDAR', inputs: ['lidar:dtm'], channel: height('lidar:dtm', 'DTM') },
   { id: 'dsm', label: 'Surface elevation (DSM)', group: 'LiDAR', inputs: ['lidar:dsm'], channel: height('lidar:dsm', 'DSM') },
-  ...INDICES.map(ix => ({ id: ix.id, label: ix.label, group: 'Imagery indices', inputs: ix.bands.map(b => `s2:${b}`), channel: indexChannel(ix, 'p2p98') })),
-  ...S2_BANDS.filter(b => b.res <= 20).map(b => ({ id: b.asset, label: `${b.esa} ${b.label}`, group: 'Imagery bands', inputs: [`s2:${b.asset}`], channel: band(b.asset) })),
+  ...INDICES.map(ix => ({ id: ix.id, label: ix.label, group: 'Leaf-on indices', inputs: ix.bands.map(b => `s2:${b}`), channel: indexChannel(ix, 'p2p98') })),
+  ...FUSION_BANDS.map(b => ({ id: b.asset, label: `${b.esa} ${b.label}`, group: 'Leaf-on bands', inputs: [`s2:${b.asset}`], channel: band(b.asset) })),
+  ...INDICES.map(ix => ({ id: `${ix.id}_off`, label: `${ix.label} (leaf-off)`, group: 'Leaf-off indices', inputs: ix.bands.map(b => `s2b:${b}`), channel: indexChannel(ix, 'p2p98', 's2b') })),
+  ...FUSION_BANDS.map(b => ({ id: `${b.asset}_off`, label: `${b.esa} ${b.label} (leaf-off)`, group: 'Leaf-off bands', inputs: [`s2b:${b.asset}`], channel: band(b.asset, 's2b') })),
+  ...['ndvi', 'evi', 'ndmi', 'ndre'].map(id => {
+    const ix = indexById.get(id)!;
+    return deltaVariable(id, ix.label, indexChannel(ix, 'p2p98'), indexChannel(ix, 'p2p98', 's2b'), [...ix.bands.map(b => `s2:${b}`), ...ix.bands.map(b => `s2b:${b}`)]);
+  }),
+  ...['nir', 'swir16'].map(a => deltaVariable(a, bandByAsset.get(a)!.esa, band(a), band(a, 's2b'), [`s2:${a}`, `s2b:${a}`])),
 ];
-const variableById = new Map(FUSION_VARIABLES.map(v => [v.id, v]));
-
-export const LANDCOVER_CLASSES: ClassDef[] = [
-  { value: 1, label: 'Water', colour: '#2c7fb8' },
-  { value: 2, label: 'Trees', colour: '#1b7837' },
-  { value: 3, label: 'Shrub or regeneration', colour: '#7fbc41' },
-  { value: 4, label: 'Grass, crops or low vegetation', colour: '#d9f0a3' },
-  { value: 5, label: 'Building or structure', colour: '#d6604d' },
-  { value: 6, label: 'Bare ground or pavement', colour: '#bababa' },
-  { value: 7, label: 'Cloud, shadow or snow (masked)', colour: '#f0f0ff' },
-];
+export const variableById = new Map(FUSION_VARIABLES.map(v => [v.id, v]));
+/** Whether a variable needs the second (leaf-off) scene. */
+export const needsLeafOff = (v: Variable) => v.inputs.some(k => k.startsWith('s2b:'));
 
 const NDVI = indexById.get('ndvi')!, NDWI = indexById.get('ndwi')!;
 const ndviCh = indexChannel(NDVI), ndwiCh = indexChannel(NDWI);
-const SCL_MASKED = new Set([3, 8, 9, 10, 11]);
 
 /**
  * NDWI, with the classifier's dark-water rule: where the bands are too dark
@@ -298,40 +309,12 @@ const waterChannel: Channel = {
   fn: (p, i, s) => { const w = ndwiCh.fn(p, i, s); if (w === w) return w; const n = p['s2:nir'][i]; return n === n && n < s.thresholds.darkNir ? 1 : NaN; },
 };
 
-/**
- * The rule-based land-cover class of one pixel, in order: masked cloud,
- * water (NDWI, or very dark NIR), then vegetated by height (trees · shrub · low), then non-vegetated
- * by height (structure · bare). NaN where an input is missing. Pure.
- */
-export function classifyPixel(v: { chm: number; ndvi: number; ndwi: number; nir: number; scl?: number }, t: Thresholds): number {
-  if (v.scl !== undefined && SCL_MASKED.has(v.scl)) return 7;
-  if (!Number.isFinite(v.chm)) return NaN;
-  // Water first, and by either test: a positive NDWI, or NIR so dark the
-  // indices are noise (open water absorbs NIR almost completely).
-  if (v.chm < t.shrub && ((Number.isFinite(v.ndwi) && v.ndwi > t.water) || (Number.isFinite(v.nir) && v.nir < t.darkNir))) return 1;
-  if (!Number.isFinite(v.ndvi)) return NaN;
-  if (v.ndvi >= t.veg) return v.chm >= t.tree ? 2 : v.chm >= t.shrub ? 3 : 4;
-  return v.chm >= t.building ? 5 : 6;
-}
-
 export const FUSION_PRODUCTS: Product[] = [
   {
     id: 'fusion-sgw', label: 'Structure · greenness · water (CHM · NDVI · NDWI)', group: 'Fusion composites',
     inputs: ['lidar:dsm', 'lidar:dtm', 's2:nir', 's2:red', 's2:green'], render: 'rgb', pad: 0, partial: true,
     channels: [{ ...chmChannel, seed: [0, 15] }, { ...ndviCh, seed: [0, 0.9] }, { ...waterChannel, seed: [-0.6, 0.3] }],
     note: 'Red = canopy height, green = NDVI, blue = NDWI. Yellow: trees. Green: low vegetation. Red/orange: tall and not green (buildings). Blue: water. Dark: bare or paved.',
-  },
-  {
-    id: 'fusion-classes', label: 'Land cover classes (rule-based)', group: 'Fusion classes',
-    inputs: ['lidar:dsm', 'lidar:dtm', 's2:nir', 's2:red', 's2:green', 's2:scl'], render: 'classes', classes: LANDCOVER_CLASSES, pad: 0,
-    channels: [{
-      label: 'Class', unit: 'class', step: 1, seed: [0, 7],
-      fn: (p, i, s) => classifyPixel({
-        chm: chmChannel.fn(p, i, s), ndvi: ndviCh.fn(p, i, s), ndwi: ndwiCh.fn(p, i, s), nir: p['s2:nir'][i],
-        scl: p['s2:scl'][i] === p['s2:scl'][i] ? p['s2:scl'][i] : undefined,
-      }, s.thresholds),
-    }],
-    note: 'Each pixel classed by canopy height (LiDAR) and NDVI / NDWI (imagery), cloud masked with SCL. A screening classification: thresholds are yours, nothing is validated.',
   },
 ];
 
