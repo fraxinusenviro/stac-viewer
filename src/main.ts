@@ -5,7 +5,8 @@
 import maplibregl, { type GeoJSONSource, type LngLatBoundsLike, type Map as MlMap } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './styles.css';
-import { LidarIndex, type LidarTile, type LonLatBox } from './lidarIndex.ts';
+import type { LidarTile, LonLatBox } from './lidarIndex.ts';
+import { copcUrl, coverageUrl, index, loadProjects, projectById, type Project } from './pointcloud/catalog.ts';
 import { registerProtocol } from './engine.ts';
 import { h, clear, fmtBytes, fmtCount } from './dom.ts';
 import type { Ctx } from './tabs/ctx.ts';
@@ -14,19 +15,10 @@ import { initImagery } from './tabs/imagery.ts';
 import { initFusion } from './tabs/fusion.ts';
 import { BASE_ANCHOR, initBasemap } from './tabs/basemap.ts';
 
-interface Project {
-  id: string; label: string; jurisdiction: string; year: number; crs: string; verticalDatum: string;
-  provider: string; licence: string; urlTemplate: string; tiles: number; points: number; bytes: number;
-  bbox: LonLatBox;
-}
-
-const DATA = new URL('data/', document.baseURI).href;
 const TILE_MIN_ZOOM = 10;
-const index = new LidarIndex(DATA + 'lidar-tiles.parquet');
 let projects: Project[] = [];
-const projectById = new Map<string, Project>();
 
-const tileUrl = (t: LidarTile) => projectById.get(t.project)?.urlTemplate.replace('{name}', t.key) ?? '';
+const tileUrl = copcUrl;
 const tileId = (t: LidarTile) => `${t.project}/${t.key}`;
 
 // ── Map ─────────────────────────────────────────────────────────────────────
@@ -81,7 +73,7 @@ map.on('load', async () => {
   // footprints. The anchors are empty layers each family inserts below.
   map.addSource('s2-footprints', { type: 'geojson', data: empty });
   map.addSource('hrdem-footprints', { type: 'geojson', data: empty });
-  map.addSource('coverage', { type: 'geojson', data: DATA + 'lidar-coverage.geojson' });
+  map.addSource('coverage', { type: 'geojson', data: coverageUrl });
   map.addSource('tiles', { type: 'geojson', data: empty, promoteId: 'id' });
   map.addLayer({ id: BASE_ANCHOR, type: 'background', layout: { visibility: 'none' } });
   map.addLayer({ id: 'anchor-elev', type: 'background', layout: { visibility: 'none' } });
@@ -95,9 +87,7 @@ map.on('load', async () => {
   map.addLayer({ id: 'tiles-line', type: 'line', source: 'tiles', minzoom: TILE_MIN_ZOOM, paint: { 'line-color': YEAR_COLOURS, 'line-width': ['case', ['boolean', ['feature-state', 'selected'], false], 2.5, 0.6] } });
 
   try {
-    const pj = await (await fetch(DATA + 'lidar-projects.json')).json();
-    projects = pj.projects;
-    projects.forEach(p => projectById.set(p.id, p));
+    projects = await loadProjects();
   } catch (e) { say(`The point-cloud project list could not be read: ${(e as Error).message}`, 'error'); }
 
   wireLidar();

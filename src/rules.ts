@@ -204,6 +204,32 @@ export const PRESETS: RuleSet[] = [
       { label: 'Broadleaf', colour: '#c2e699', when: [c('chm', '>=', 5), c('s_ndvi', '>=', 0.5), c('s_d_ndvi', '>', 0.3)] },
     ],
   },
+  {
+    // Candidate cover from every source at once: LiDAR height (HRDEM), the
+    // laser's own returns (point cloud), Sentinel-2 spectra and the
+    // orthophoto. Laser dropout marks water the imagery misses; leaf type is
+    // the six-term conifer index (calibrate it first, or woody pixels stay
+    // "leaf type undetermined"); low cover is split by ortho greenness.
+    name: 'Candidate cover — LiDAR intensity + orthophoto + Sentinel', maskClouds: true, rules: [
+      { label: 'Water', colour: '#2c7fb8', when: [c('chm', '<', 1), c('ndwi', '>', 0.05)] },
+      { label: 'Water', colour: '#2c7fb8', when: [c('chm', '<', 1), c('nir', '<', 0.04)] },
+      { label: 'Water', colour: '#2c7fb8', when: [c('chm', '<', 1), c('pc_den', '<', 0.5)] },
+      // Roofs: tall, not green, and solid — no pulse gets through a roof, while a
+      // shadowed crown that the photo also sees as grey still lets some reach the
+      // ground. 10 m NDVI cannot do this: it mixes the roof with the yard trees.
+      { label: 'Built structure', colour: '#d6604d', when: [c('chm', '>=', 2.5), c('o_exg', '<', 0.02), c('pc_pen', '<', 0.05)] },
+      { label: 'Built structure', colour: '#d6604d', when: [c('chm', '>=', 2.5), c('ndvi', '<', 0.3)] },
+      { label: 'Coniferous', colour: '#00441b', when: [c('chm', '>=', 2), c('ci6', '>=', 0.25)] },
+      { label: 'Mixed or uncertain', colour: '#41ab5d', when: [c('chm', '>=', 2), c('ci6', 'between', -0.25, 0.25)] },
+      { label: 'Deciduous', colour: '#a6d96a', when: [c('chm', '>=', 2), c('ci6', '<=', -0.25)] },
+      { label: 'Woody, leaf type undetermined', colour: '#7f7f3f', when: [c('chm', '>=', 2), c('ndvi', '>=', 0.4)] },
+      { label: 'Herbaceous', colour: '#ecd66e', when: [c('chm', '<', 2), c('ndvi', '>=', 0.3), c('o_exg', '>=', 0.05)] },
+      // Roads and paving are grey in the orthophoto even where a 10 m Sentinel pixel is mostly roadside trees.
+      { label: 'Bare or impervious', colour: '#c4a478', when: [c('chm', '<', 2), c('o_exg', '<', 0.02)] },
+      { label: 'Low ground cover', colour: '#966e96', when: [c('chm', '<', 2), c('ndvi', '>=', 0.25)] },
+      { label: 'Bare or impervious', colour: '#c4a478', when: [c('chm', '<', 2), c('ndvi', '<', 0.25)] },
+    ],
+  },
   { name: 'Empty', maskClouds: true, rules: [] },
 ];
 

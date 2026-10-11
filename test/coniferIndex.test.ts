@@ -58,3 +58,24 @@ test('too few woody pixels refuses to calibrate', () => {
   const p = stand(20);
   assert.equal(calibrate(p, 20, { leafOff: false, sharpened: false }), null);
 });
+
+test('six-term variant: FieldMapper weights, point-cloud and orthophoto terms', async () => {
+  const { ciInputs, CI_VARIANTS } = await import('../src/coniferIndex.ts');
+  const v = CI_VARIANTS.find(x => x.id === 'ci6')!;
+  const { inputs } = ciInputs(v.options);
+  for (const k of ['pc:ivg', 'pc:att', 'ortho:r', 'ortho:tex', 's2:nir']) assert.ok(inputs.includes(k), k);
+  assert.ok(!inputs.includes('s2:blue'), 'brightness comes from the orthophoto');
+  // Woody pixels: conifer = low laser intensity, high attenuation, dark ortho; broadleaf the opposite.
+  const n = 200, P: Planes = {};
+  for (const k of inputs) P[k] = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const con = i % 2 === 0, j = (i % 7) * 0.01;
+    P['lidar:dsm'][i] = 20; P['lidar:dtm'][i] = 0;
+    P['s2:nir'][i] = (con ? 0.2 : 0.4) + j; P['s2:red'][i] = 0.03;
+    P['pc:ivg'][i] = (con ? 30 : 60) + j * 100; P['pc:att'][i] = (con ? 0.3 : 0.1) + j;
+    P['ortho:r'][i] = con ? 40 : 90; P['ortho:g'][i] = con ? 60 : 140; P['ortho:b'][i] = con ? 40 : 70; P['ortho:tex'][i] = (con ? 0.12 : 0.05) + j;
+  }
+  const cal = calibrate(P, n, v.options)!;
+  assert.equal(cal.terms.reduce((a, t) => a + t.weight, 0).toFixed(2), '1.30');
+  assert.ok(coniferIndexAt(cal, P, 0) > 0 && coniferIndexAt(cal, P, 1) < 0);
+});

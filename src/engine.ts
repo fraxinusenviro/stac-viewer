@@ -23,6 +23,9 @@ import { projDef } from './crs.ts';
 import { paint, channelStats, classCounts, type ChannelStats } from './paint.ts';
 import { paintSpec, type ChannelFn, type Planes, type Product, type ProductStyle } from './products.ts';
 import { unmix, type UnmixParams } from './unmix.ts';
+import { samplePointCloud } from './pointcloud/pointCloud.ts';
+import type { PcMetric } from './pointcloud/pcMetrics.ts';
+import { sampleXyz } from './xyz.ts';
 import {
   TILE, boxGrid, chooseLevel, controlGrid, gridWindow, interpGrid, metresPerPixel, tileBounds, tileGrid,
   type Geo, type LonLatBox, type OutGrid,
@@ -95,7 +98,18 @@ export interface InputSource {
   nodata: number | null;
   /** Heights: HRDEM fills with −32767; anything this low is not ground. */
   minValid?: number;
+  /**
+   * Where the numbers come from: a COG (default), point-cloud metrics read
+   * from the COPC index (`url` is then just a grouping key and `metric` names
+   * the metric), or a Web Mercator tile service (`url` is its template,
+   * `sample` 0–2 = R, G, B and 3 = texture).
+   */
+  kind?: 'cog' | 'pc' | 'xyz';
+  metric?: PcMetric;
+  maxZoom?: number;
 }
+
+const isCog = (s: InputSource) => !s.kind || s.kind === 'cog';
 
 /** A window read that has not finished in this long is abandoned (and retried once on a fresh file). */
 const READ_DEADLINE_MS = 20000;
@@ -124,6 +138,14 @@ async function samplePlanes(sources: Record<string, InputSource>, out: OutGrid, 
     (byUrl.get(s.url) ?? byUrl.set(s.url, []).get(s.url)!).push([k, s]);
   }
   await Promise.all([...byUrl].map(async ([url, entries]) => {
+    const kind = entries[0][1].kind;
+    if (kind === 'pc' || kind === 'xyz') {
+      const got = kind === 'pc'
+        ? await samplePointCloud(out, entries.map(([k, s]) => [k, s.metric!])).catch(e => { console.warn('[pc]', e); return {}; })
+        : await sampleXyz({ template: url, maxZoom: entries[0][1].maxZoom ?? 19 }, out, entries.map(([k, s]) => [k, s.sample]));
+      for (const [k] of entries) if ((got as Record<string, Float32Array>)[k]) planes[k] = (got as Record<string, Float32Array>)[k];
+      return;
+    }
     let f: CogFile;
     try { f = await openFile(url); } catch { return; }
     const grid = controlGrid(out, f.toSrc, f.geo);
@@ -233,10 +255,11 @@ const sigOf = (d: LayerDef) => JSON.stringify([d.product.pad, Object.entries(d.s
 export async function setLayer(id: string, def: LayerDef): Promise<LonLatBox> {
   const missing = def.product.inputs.filter(k => !def.sources[k]);
   if (missing.length) throw new Error(`no source for ${missing.join(', ')}`);
-  const opened = await Promise.all([...new Set(Object.values(def.sources).map(s => s.url))].map(openFile));
+  const opened = await Promise.all([...new Set(Object.values(def.sources).filter(isCog).map(s => s.url))].map(openFile));
   const b = opened.map(f => f.bounds);
-  // The product only draws where EVERY input has data, so its bounds are the intersection.
-  const bounds: LonLatBox = [Math.max(...b.map(x => x[0])), Math.max(...b.map(x => x[1])), Math.min(...b.map(x => x[2])), Math.min(...b.map(x => x[3]))];
+  // The product only draws where EVERY input has data, so its bounds are the
+  // intersection (of the COGs: point clouds and tile services are open-ended).
+  const bounds: LonLatBox = b.length ? [Math.max(...b.map(x => x[0])), Math.max(...b.map(x => x[1])), Math.min(...b.map(x => x[2])), Math.min(...b.map(x => x[3]))] : [-180, -85, 180, 85];
   layers.set(id, { ...def, sig: sigOf(def), bounds });
   return bounds;
 }
@@ -250,7 +273,7 @@ export function removeLayer(id: string): void { layers.delete(id); }
 
 export function layerFiles(id: string): Promise<CogFile[]> {
   const L = layers.get(id);
-  return L ? Promise.all([...new Set(Object.values(L.sources).map(s => s.url))].map(openFile)) : Promise.resolve([]);
+  return L ? Promise.all([...new Set(Object.values(L.sources).filter(isCog).map(s => s.url))].map(openFile)) : Promise.resolve([]);
 }
 
 // The plane cache: per layer inputs and tile, never per style.
@@ -347,8 +370,9 @@ export async function viewStats(id: string, box: LonLatBox): Promise<ViewStats |
   const w = Math.max(16, Math.round(aspect >= 1 ? 256 : 256 * aspect)), h = Math.max(16, Math.round(aspect >= 1 ? 256 / aspect : 256));
   const planes = await planesFor(L.sources, boxGrid(box, w, h), L.product.sharpen);
   const chan = channelValues(L.product, L.style, planes, w * h);
-  if (L.product.render === 'classes') {
-    const counts = classCounts(chan[0]);
+  if (L.product.render === 'classes' || L.product.classOf) {
+    const cls = L.product.classOf ? (() => { const a = new Float32Array(w * h); for (let i = 0; i < a.length; i++) a[i] = L.product.classOf!(planes, i, L.style); return a; })() : chan[0];
+    const counts = classCounts(cls);
     const total = [...counts.values()].reduce((a, b) => a + b, 0);
     return { channels: [null], classes: new Map([...counts].map(([k, c]) => [k, total ? c / total : 0])) };
   }

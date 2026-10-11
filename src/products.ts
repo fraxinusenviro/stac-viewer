@@ -80,6 +80,8 @@ export interface Product {
     value: (row: number, col: number) => number;
     unclassified?: (col: number) => number;
   };
+  /** A class layer drawn some other way (a tint over the orthophoto): the class of a pixel, for the legend's shares. */
+  classOf?: ChannelFn;
   /** Sharpen these imagery inputs with the CHM before the channels are computed (unmix.ts); channels read them as `u:<key>`. */
   sharpen?: { keys: string[]; params: UnmixParams };
   /** One line under the picker: what the product is, and its formula. */
@@ -335,7 +337,39 @@ function sharpenedTwins(): Variable[] {
   }
   return out;
 }
-FUSION_VARIABLES.push(...sharpenedTwins(), ...coniferVariables());
+FUSION_VARIABLES.push(...sharpenedTwins());
+
+// ── Point-cloud and orthophoto evidence ─────────────────────────────────────
+
+const plane = (key: string, label: string, unit: string, step: number): Channel => ({ label, unit, step, seed: 'p2p98', fn: (p, i) => p[key][i] });
+
+/** Point-cloud metrics (pcMetrics.ts), per 2–16 m cell by zoom. Intensity is uncalibrated: compare within one acquisition. */
+export const PC_VARIABLES: Variable[] = ([
+  { id: 'pc_ivg', label: 'Vegetation intensity (laser NIR)', inputs: ['pc:ivg'], channel: plane('pc:ivg', 'Vegetation intensity', 'DN', 1) },
+  { id: 'pc_int', label: 'First-return intensity', inputs: ['pc:int'], channel: plane('pc:int', 'First-return intensity', 'DN', 1) },
+  { id: 'pc_igr', label: 'Ground intensity', inputs: ['pc:igr'], channel: plane('pc:igr', 'Ground intensity', 'DN', 1) },
+  { id: 'pc_pen', label: 'Penetration (share of pulses reaching ground)', inputs: ['pc:pen'], channel: { ...plane('pc:pen', 'Penetration', 'ratio', 0.01), domain: [0, 1] } },
+  { id: 'pc_att', label: 'Canopy attenuation (per m)', inputs: ['pc:att'], channel: plane('pc:att', 'Canopy attenuation', '/m', 0.005) },
+  { id: 'pc_den', label: 'First-return density (per m²)', inputs: ['pc:den'], channel: plane('pc:den', 'First-return density', '/m²', 0.1) },
+] as Omit<Variable, 'group'>[]).map(v => ({ ...v, group: 'LiDAR point cloud' }));
+
+const ORTHO_RGB = ['ortho:r', 'ortho:g', 'ortho:b'];
+/** Orthophoto evidence: what a sub-metre colour photo adds — crown brightness, greenness and shadow texture. */
+export const ORTHO_VARIABLES: Variable[] = ([
+  { id: 'o_bright', label: 'Ortho brightness', inputs: ORTHO_RGB, channel: { label: 'Ortho brightness', unit: '0–1', step: 0.01, seed: 'p2p98', domain: [0, 1], fn: (p: Planes, i: number) => (p['ortho:r'][i] + p['ortho:g'][i] + p['ortho:b'][i]) / 765 } },
+  {
+    id: 'o_exg', label: 'Ortho excess green', inputs: ORTHO_RGB, channel: {
+      label: 'Ortho excess green', unit: 'index', step: 0.01, seed: 'p2p98', domain: [-1, 1],
+      fn: (p: Planes, i: number) => { const r = p['ortho:r'][i], g = p['ortho:g'][i], b = p['ortho:b'][i], t = r + g + b; return t >= 15 ? (2 * g - r - b) / t : NaN; },
+    },
+  },
+  { id: 'o_tex', label: 'Ortho texture (brightness s.d., ±5 m)', inputs: ['ortho:tex'], channel: plane('ortho:tex', 'Ortho texture', '0–1', 0.005) },
+  { id: 'o_r', label: 'Ortho red', inputs: ['ortho:r'], channel: { ...plane('ortho:r', 'Ortho red', 'DN', 1), seed: [0, 255] } },
+  { id: 'o_g', label: 'Ortho green', inputs: ['ortho:g'], channel: { ...plane('ortho:g', 'Ortho green', 'DN', 1), seed: [0, 255] } },
+  { id: 'o_b', label: 'Ortho blue', inputs: ['ortho:b'], channel: { ...plane('ortho:b', 'Ortho blue', 'DN', 1), seed: [0, 255] } },
+] as Omit<Variable, 'group'>[]).map(v => ({ ...v, group: 'Orthophoto (RGB)' }));
+
+FUSION_VARIABLES.push(...PC_VARIABLES, ...ORTHO_VARIABLES, ...coniferVariables());
 
 export const variableById = new Map(FUSION_VARIABLES.map(v => [v.id, v]));
 
@@ -376,6 +410,56 @@ FUSION_PRODUCTS.push({
   channels: (['nir', 'red', 'green'] as const).map(a => band(a, 's2', 'u:')),
   note: 'Sentinel-2 false colour unmixed by LiDAR height class: each 1 m pixel takes the spectrum of its height class (ground, shrub, canopy) in its neighbourhood, and every 10 m pixel still averages to what Sentinel-2 measured. From zoom 15.',
 });
+
+const pcVar = (id: string) => PC_VARIABLES.find(v => v.id === id)!.channel;
+FUSION_PRODUCTS.push(
+  {
+    id: 'fusion-pcir', label: 'Pseudo colour-infrared (LiDAR intensity · ortho red · ortho green)', group: 'Fusion composites',
+    inputs: ['pc:int', 'ortho:r', 'ortho:g'], render: 'rgb', pad: 0, partial: true,
+    channels: [{ ...pcVar('pc_int'), label: 'LiDAR intensity (1064 nm)' }, { ...plane('ortho:r', 'Ortho red', 'DN', 1), seed: [0, 255] }, { ...plane('ortho:g', 'Ortho green', 'DN', 1), seed: [0, 255] }],
+    note: 'The laser is near-infrared, so its intensity can stand in for the NIR band a colour orthophoto lacks: red = LiDAR first-return intensity (2–16 m cells by zoom), green = ortho red, blue = ortho green. Vegetation reads red as in a CIR photo. Point clouds read from zoom 13.',
+  },
+  {
+    id: 'fusion-pc-evidence', label: 'Point-cloud evidence (vegetation intensity · penetration · attenuation)', group: 'Fusion composites',
+    inputs: ['pc:ivg', 'pc:pen', 'pc:att'], render: 'rgb', pad: 0, partial: true,
+    channels: [pcVar('pc_ivg'), { ...pcVar('pc_pen'), seed: [0, 1] }, pcVar('pc_att')],
+    note: 'Red = vegetation intensity (bright: broadleaf leaves, grass), green = share of pulses reaching the ground (open canopy, bare ground), blue = canopy attenuation (dense crowns that stop pulses: conifer). Uncalibrated: compare within the view.',
+  },
+);
+
+/**
+ * A class product drawn as a TINT over the orthophoto — the candidate cover
+ * classes as a "fourth band" on a sub-metre photo: each pixel is the photo's
+ * colour mixed with its class colour at `alpha`; unclassified pixels show the
+ * photo alone.
+ */
+export function tintProduct(base: Product, alpha: number): Product {
+  if (!base.classes) throw new Error(`${base.label} has no classes to tint with`);
+  const rgbOf = (hex: string) => [1, 3, 5].map(k => parseInt(hex.slice(k, k + 2), 16));
+  const colours = new Map(base.classes.map(c => [c.value, rgbOf(c.colour)]));
+  const cls = base.channels[0].fn;
+  // The class is evaluated once per pixel, not once per colour channel.
+  const memo = new WeakMap<Planes, Float32Array>();
+  const classAt: ChannelFn = (p, i, s) => {
+    let a = memo.get(p);
+    if (!a) { a = new Float32Array(p['ortho:r'].length).fill(-1); memo.set(p, a); }
+    if (a[i] === -1) a[i] = cls(p, i, s);
+    return a[i];
+  };
+  return {
+    ...base, id: `tint:${alpha}:${base.id}`, label: `${base.label} — tint over the orthophoto`, render: 'rgb', identity: true, partial: true,
+    inputs: [...new Set([...base.inputs, ...ORTHO_RGB])], classOf: classAt,
+    channels: (['r', 'g', 'b'] as const).map((c, j): Channel => ({
+      label: c.toUpperCase(), unit: 'DN', step: 1, seed: [0, 255],
+      fn: (p, i, s) => {
+        const o = p[`ortho:${c}`][i], k = classAt(p, i, s), col = k === k ? colours.get(k) : undefined;
+        if (!col) return o;
+        return o === o ? (1 - alpha) * o + alpha * col[j] : col[j];
+      },
+    })),
+    note: `${base.note} Drawn over the orthophoto at ${Math.round(alpha * 100)} % tint.`,
+  };
+}
 
 /** A custom fusion composite: any three variables as red, green and blue. */
 export function customFusionProduct(ids: [string, string, string]): Product {

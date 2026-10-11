@@ -83,8 +83,47 @@ Ported from FieldMapper's `conifer_index` (`lib/habitat/models/landcover.ts`). E
 z-score over the woody pixels in view (canopy ≥ 3 m, NDVI ≥ 0.4), signed so that positive means needle-leaved, and the
 scores are averaged by weight. Otsu places the split, and Sarle's bimodality coefficient (above ~0.555) says whether there
 are really two groups. The point-cloud terms (laser intensity, canopy attenuation) are not available from HRDEM rasters,
-so the terms are Sentinel-2's: − NIR 0.35 · − visible brightness 0.20 · − excess green 0.15, plus − ΔNDVI 0.35 and
-+ leaf-off NDVI 0.20 with a leaf-off scene. Calibrate in each area. Four variants: one or two scenes, raw or sharpened.
+so the raster-only variants use Sentinel-2's: − NIR 0.35 · − visible brightness 0.20 · − excess green 0.15, plus − ΔNDVI 0.35 and
++ leaf-off NDVI 0.20 with a leaf-off scene. Calibrate in each area. Four variants: one or two scenes, raw or sharpened. Two more put FieldMapper's own six terms
+back, from the point cloud and the orthophoto (next section).
+
+## Point-cloud evidence, orthophoto and the candidate-cover "4th band" (proof of concept)
+
+The Fusion tab can also read two sources that HRDEM rasters and 10 m Sentinel-2 cannot supply:
+
+- **The point cloud itself.** `src/pointcloud/` reads the CanElevation COPC tiles the index lists, in a Web Worker
+  (copc.js + laz-perf, ported from FieldMapper's `copcSource`). It reads only the hierarchy pages and octree nodes that
+  meet the ground in view, and only to the depth the cell size needs. It then computes FieldMapper's first-return
+  metrics per cell: **vegetation intensity** (the laser is near-infrared, 1064 nm), **ground intensity**, **first-return
+  intensity**, **penetration** (share of pulses reaching the ground), **canopy attenuation** (Beer–Lambert over the
+  canopy) and **first-return density**. Heights are above a ground surface built from the class 2 and 9 returns. The
+  metrics are computed per 128 × 128-cell chunk on the tiles' own UTM grid. Cells are 2, 4, 8 or 16 m, chosen by zoom;
+  nothing is read zoomed out past level ~13. Intensity is uncalibrated, so compare it within one acquisition.
+- **An orthophoto** (`src/xyz.ts`): colour tiles sampled in the browser. The provincial **NSODB** (1:10 000, or 1:2 000
+  urban) is the default, and its photo year is read from the service's `Photo_Date` layer and stated beside the product.
+  **Esri World Imagery** is the alternative. Neither carries NIR. Derived planes: brightness, excess green and crown
+  **texture** (brightness s.d. over ±5 m, meaningful from zoom ~16).
+
+What they add:
+
+- Variables in the rule and strata editors, under **LiDAR point cloud** and **Orthophoto (RGB)**.
+- The **six-term conifer index** (`ci6`, `ci6b` with leaf-off), FieldMapper's own terms and weights: − vegetation
+  intensity 0.35 · − ortho brightness 0.20 · − ortho excess green 0.15 · + canopy attenuation 0.15 · + ortho texture 0.15
+  · − Sentinel-2 NIR 0.30.
+- The rule preset **Candidate cover — LiDAR intensity + orthophoto + Sentinel**: water (including laser dropout), built
+  structures (tall, not green in the photo, and no pulse reaching the ground), coniferous / mixed / deciduous from `ci6`,
+  herbaceous, low ground cover, and bare or impervious (grey in the photo even where 10 m NDVI is mixed with roadside
+  trees).
+- **Show as → Tint over the orthophoto**: any class product (rules or strata) drawn as a tint on the photo, with the
+  shares in the legend. This is the "4th band" on the RGB.
+- **Pseudo colour-infrared** (LiDAR intensity · ortho red · ortho green) and **point-cloud evidence** (vegetation
+  intensity · penetration · attenuation) composites.
+
+Costs and limits: a first draw at zoom 16 reads ~25 M returns (~270 MB of COPC) and takes 15–25 s, and calibrating the
+index takes ~10 s. The LiDAR (2018–2019 here), the orthophoto (2017 here) and the Sentinel scenes are different years.
+Orthophoto pixels are computed in the viewer's browser from the tiles the service serves to it, and nothing is stored or
+redistributed. Whether NSODB permits derived products beyond that has not been confirmed; the downloadable files are
+sold under a restricted licence. This is a proof of concept, not a production map.
 
 ## How it draws
 

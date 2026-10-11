@@ -17,7 +17,7 @@ import { h, clear, fmtDate } from '../dom.ts';
 import { samplePoint, sampleView, viewStats } from '../engine.ts';
 import { hideLayer, restyle, updateLayer } from '../mapLayers.ts';
 import {
-  FUSION_PRODUCTS, FUSION_VARIABLES, customFusionProduct, defaultStyle, needsLeafOff, sharpeningFor, variableById,
+  FUSION_PRODUCTS, FUSION_VARIABLES, customFusionProduct, defaultStyle, needsLeafOff, sharpeningFor, tintProduct, variableById,
   type Product, type ProductStyle, type Variable,
 } from '../products.ts';
 import {
@@ -35,9 +35,12 @@ import { stretchPanel, type StretchPanel } from '../ui/stretch.ts';
 import { findHrdem } from './rasters.ts';
 import { ANCHOR, itemName, shared, type Ctx } from './ctx.ts';
 import { variableOptions } from '../ui/variables.ts';
+import { ORTHO_SERVICES, orthoPhotoYear, orthoService } from '../xyz.ts';
+import { pcStatus } from '../pointcloud/pointCloud.ts';
+import { fmtBytes, fmtCount } from '../dom.ts';
 
 const LAYER = 'fusion';
-const LS_RULES = 'sv.rules', LS_SAMPLES = 'sv.samples', LS_STRATA = 'sv.strata';
+const LS_RULES = 'sv.rules', LS_SAMPLES = 'sv.samples', LS_STRATA = 'sv.strata', LS_SOURCES = 'sv.sources';
 const SAMPLE_COLOURS = ['#e66101', '#5e3c99'];
 
 const load = <T>(k: string, fallback: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) as T : fallback; } catch { return fallback; } };
@@ -61,7 +64,18 @@ export function initFusion(ctx: Ctx) {
   let sceneId: string | null = null;
   let offId = '';
   let leafOffScenes: S2Item[] = [];
-  let mode: 'fusion-sgw' | 'fusion-sharp-fcir' | 'custom' | 'rules' | 'strata' = 'strata';
+  let mode: 'fusion-sgw' | 'fusion-sharp-fcir' | 'fusion-pcir' | 'fusion-pc-evidence' | 'custom' | 'rules' | 'strata' = 'strata';
+  // The point cloud and the orthophoto: device-local choices.
+  const src = load<{ ortho: string; pc: boolean; display: 'classes' | 'tint'; alpha: number }>(LS_SOURCES, { ortho: 'nsodb10k', pc: true, display: 'classes', alpha: 0.45 });
+  let orthoId = src.ortho, usePc = src.pc, display = src.display, tintAlpha = src.alpha;
+  const saveSources = () => save(LS_SOURCES, { ortho: orthoId, pc: usePc, display, alpha: tintAlpha });
+  let photoYear = '';
+  const pcLine = h('p', { class: 'muted small', 'aria-live': 'polite' });
+  pcStatus.events.addEventListener('change', () => {
+    pcLine.textContent = pcStatus.loading
+      ? `Reading the point cloud: ${pcStatus.loading} chunk${pcStatus.loading === 1 ? '' : 's'} in progress…`
+      : pcStatus.chunks ? `Point cloud: ${fmtCount(pcStatus.points)} returns read in ${pcStatus.chunks} chunks, ${fmtBytes(pcStatus.bytes)}.${pcStatus.lastError ? ` Last error: ${pcStatus.lastError}` : ''}` : '';
+  });
   let scheme: StrataScheme = (() => { try { return parseScheme(load(LS_STRATA, null)); } catch { return defaultScheme(); } })();
   let ciVariant = 'ci';
   let ciReport: Calibration | null = null;
@@ -84,7 +98,7 @@ export function initFusion(ctx: Ctx) {
   const scene = () => allScenes().find(s => s.id === sceneId) ?? null;
   const offScene = () => (offId ? allScenes().find(s => s.id === offId) ?? null : null);
   const lidarChoices = () => shared.hrdem.filter(i => i.dsm);
-  const items = () => ({ s2: scene(), s2b: offScene(), lidar: lidar() });
+  const items = () => ({ s2: scene(), s2b: offScene(), lidar: lidar(), ortho: orthoService(orthoId), pointCloud: usePc });
 
   shared.events.addEventListener('scenes', () => { if (!scene()) sceneId = shared.scenes[0]?.id ?? null; render(); });
   shared.events.addEventListener('hrdem', () => { if (!lidar()) lidarId = lidarChoices()[0]?.id ?? null; render(); });
@@ -120,8 +134,13 @@ export function initFusion(ctx: Ctx) {
 
   // ── Drawing ───────────────────────────────────────────────────────────────
 
-  const productFor = (): Product =>
-    mode === 'strata' ? compileScheme(scheme) : mode === 'rules' ? compileRuleSet(rules) : mode === 'custom' ? customFusionProduct(custom) : FUSION_PRODUCTS.find(p => p.id === mode)!;
+  const productFor = (): Product => {
+    if (mode === 'strata' || mode === 'rules') {
+      const base = mode === 'strata' ? compileScheme(scheme) : compileRuleSet(rules);
+      return display === 'tint' ? tintProduct(base, tintAlpha) : base;
+    }
+    return mode === 'custom' ? customFusionProduct(custom) : FUSION_PRODUCTS.find(p => p.id === mode)!;
+  };
 
   async function draw(reseed: boolean) {
     let p: Product;
@@ -139,7 +158,12 @@ export function initFusion(ctx: Ctx) {
       render();
       if (!keep && p.render !== 'classes') { await panel.seed(); restyle(map, LAYER, st); } else void panel.refresh();
       const s = scene(), o = offScene(), l = lidar();
-      say(`${p.label}: LiDAR ${l?.datetime ? fmtDate(l.datetime) : '(undated)'}, imagery ${s ? fmtDate(s.datetime) : '—'}${o && p.inputs.some(k => k.startsWith('s2b:')) ? ` and ${fmtDate(o.datetime)}` : ''}.`);
+      if (p.inputs.some(k => k.startsWith('ortho:'))) {
+        const [lon, lat] = [(ctx.viewBox()[0] + ctx.viewBox()[2]) / 2, (ctx.viewBox()[1] + ctx.viewBox()[3]) / 2];
+        photoYear = await orthoPhotoYear(orthoId, lon, lat);
+        render();
+      }
+      say(`${p.label}: LiDAR ${l?.datetime ? fmtDate(l.datetime) : '(undated)'}, imagery ${s ? fmtDate(s.datetime) : '—'}${o && p.inputs.some(k => k.startsWith('s2b:')) ? ` and ${fmtDate(o.datetime)}` : ''}${photoYear && p.inputs.some(k => k.startsWith('ortho:')) ? `, orthophoto ${photoYear}` : ''}.`);
     } catch (e) { say(`Could not draw: ${(e as Error).message}`, 'error'); }
   }
 
@@ -167,7 +191,7 @@ export function initFusion(ctx: Ctx) {
   /** Every variable these inputs can supply. */
   const availableVariables = () => {
     const it = items();
-    return FUSION_VARIABLES.filter(v => v.inputs.every(k => (k.startsWith('lidar:') ? !!it.lidar : k.startsWith('s2b:') ? !!it.s2b : !!it.s2)));
+    return FUSION_VARIABLES.filter(v => v.inputs.every(k => (k.startsWith('lidar:') ? !!it.lidar : k.startsWith('s2b:') ? !!it.s2b : k.startsWith('pc:') ? it.pointCloud : k.startsWith('ortho:') ? !!it.ortho : !!it.s2)));
   };
 
   async function valuesAt(lon: number, lat: number) {
@@ -233,6 +257,8 @@ export function initFusion(ctx: Ctx) {
   async function calibrateCi() {
     const v = CI_VARIANTS.find(x => x.id === ciVariant)!;
     if (v.options.leafOff && !offScene()) { say('This variant needs a leaf-off scene.', 'error'); return; }
+    if (v.options.ortho && !orthoService(orthoId)) { say('This variant needs an orthophoto: choose one above.', 'error'); return; }
+    if (v.options.pointCloud && !usePc) { say('This variant needs the LiDAR point cloud: switch it on above.', 'error'); return; }
     if (!lidar() || !scene()) { say('Choose a LiDAR source and a scene first.', 'error'); return; }
     say(`Calibrating ${v.label} on the woody pixels in view…`);
     try {
@@ -240,13 +266,14 @@ export function initFusion(ctx: Ctx) {
       const sources = resolveInputs(inputs, items());
       const { planes, n } = await sampleView(sources, ctx.viewBox(), sharpenKeys.length ? { keys: sharpenKeys, params: rules.sharpen ?? DEFAULT_UNMIX } : undefined);
       const cal = calibrate(planes, n, v.options);
+      if (cal && v.options.pointCloud && !cal.terms.some(t => t.id === 'intensity' && Number.isFinite(t.median))) say('No point-cloud returns were read for this view (no indexed COPC tiles here, or zoomed out past level 13): the index falls back to its other terms.', 'error');
       if (!cal) { say('Too few woody pixels (canopy ≥ 3 m, NDVI ≥ 0.4) in view to calibrate. Move to a forested area.', 'error'); return; }
       calibrations.set(v.id, cal);
       ciReport = cal;
       render();
       // Repaint only if what is on the map reads this index — and say the
       // calibration AFTER the redraw, or the redraw's own line replaces it.
-      const usesIt = (mode === 'rules' && ruleVariables(rules).some(x => x.id === v.id)) || (mode === 'custom' && custom.includes(v.id));
+      const usesIt = (mode === 'rules' && ruleVariables(rules).some(x => x.id === v.id)) || (mode === 'strata' && scheme.covers.some(cv => cv.when.some(w => w.v === v.id))) || (mode === 'custom' && custom.includes(v.id));
       if (shown && usesIt) await draw(false);
       say(`${v.label} calibrated on ${cal.woodyPixels.toLocaleString()} woody pixels: split at ${cal.threshold.toFixed(2)} z, bimodality ${Number.isFinite(cal.bimodality) ? cal.bimodality.toFixed(2) : 'n/a'}.`);
     } catch (e) { say(`Could not calibrate: ${(e as Error).message}`, 'error'); }
@@ -257,7 +284,10 @@ export function initFusion(ctx: Ctx) {
     wrap.append(h('p', { class: 'muted small' }, 'Each line of evidence becomes a robust z-score over the woody pixels in view (canopy ≥ 3 m, NDVI ≥ 0.4), signed so positive means needle-leaved, and averaged by weight; Otsu places the split. Calibrate in each new area: the index describes contrasts within the view, not absolute values.'));
     wrap.append(h('div', { class: 'row' },
       h('select', { class: 'grow', 'aria-label': 'Conifer index variant', onchange: (e: Event) => { ciVariant = (e.target as HTMLSelectElement).value; ciReport = calibrations.get(ciVariant) ?? null; render(); } },
-        ...CI_VARIANTS.map(v => h('option', { value: v.id, selected: v.id === ciVariant, disabled: v.options.leafOff && !offScene() }, v.label + (v.options.leafOff && !offScene() ? ' (needs leaf-off)' : '')))),
+        ...CI_VARIANTS.map(v => {
+          const why = v.options.leafOff && !offScene() ? 'needs leaf-off' : v.options.ortho && !orthoService(orthoId) ? 'needs an orthophoto' : v.options.pointCloud && !usePc ? 'needs the point cloud' : '';
+          return h('option', { value: v.id, selected: v.id === ciVariant, disabled: !!why }, v.label + (why ? ` (${why})` : ''));
+        })),
       h('button', { class: 'btn small-btn', onclick: () => void calibrateCi() }, 'Calibrate to this view')));
     const cal = ciReport && calibrations.get(ciVariant) === ciReport ? ciReport : null;
     if (cal) {
@@ -294,7 +324,12 @@ export function initFusion(ctx: Ctx) {
       h('label', { class: 'field' }, 'Leaf-on scene', h('select', { onchange: (e: Event) => { sceneId = (e.target as HTMLSelectElement).value; redraw(); } },
         ...(scenes.length ? scenes.map(s => sceneOpt(s, sceneId)) : [h('option', { value: '' }, 'Search in Imagery, or Find inputs')]))),
       h('label', { class: 'field' }, 'Leaf-off scene (optional, for seasonal change)', h('select', { onchange: (e: Event) => { offId = (e.target as HTMLSelectElement).value; redraw(); } },
-        h('option', { value: '', selected: !offId }, 'None'), ...scenes.filter(s => s.id !== sceneId).map(s => sceneOpt(s, offId)))));
+        h('option', { value: '', selected: !offId }, 'None'), ...scenes.filter(s => s.id !== sceneId).map(s => sceneOpt(s, offId)))),
+      h('label', { class: 'field' }, 'Orthophoto (sub-metre RGB)', h('select', { onchange: (e: Event) => { orthoId = (e.target as HTMLSelectElement).value; photoYear = ''; saveSources(); redraw(); } },
+        h('option', { value: '', selected: !orthoId }, 'None'), ...ORTHO_SERVICES.map(o => h('option', { value: o.id, selected: o.id === orthoId }, o.label)))),
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: usePc, onchange: (e: Event) => { usePc = (e.target as HTMLInputElement).checked; saveSources(); redraw(); } }),
+        'LiDAR point cloud (intensity, penetration, attenuation — read from the COPC tiles, from zoom 13)'),
+      pcLine);
   }
 
   function renderRuleEditor() {
@@ -409,11 +444,23 @@ export function initFusion(ctx: Ctx) {
       h('option', { value: 'rules', selected: mode === 'rules' }, 'Rule-based classes (editable)'),
       h('option', { value: 'fusion-sgw', selected: mode === 'fusion-sgw' }, FUSION_PRODUCTS[0].label),
       h('option', { value: 'fusion-sharp-fcir', selected: mode === 'fusion-sharp-fcir' }, FUSION_PRODUCTS.find(p => p.id === 'fusion-sharp-fcir')!.label),
+      h('option', { value: 'fusion-pcir', selected: mode === 'fusion-pcir' }, FUSION_PRODUCTS.find(p => p.id === 'fusion-pcir')!.label),
+      h('option', { value: 'fusion-pc-evidence', selected: mode === 'fusion-pc-evidence' }, FUSION_PRODUCTS.find(p => p.id === 'fusion-pc-evidence')!.label),
       h('option', { value: 'custom', selected: mode === 'custom' }, 'Custom fusion RGB…'))));
 
     if (mode === 'custom') {
       el.append(h('div', { class: 'rgbpick' }, ...(['Red', 'Green', 'Blue'] as const).map((c, i) => h('label', { class: 'field' }, c,
         h('select', { onchange: (e: Event) => { custom = [...custom] as [string, string, string]; custom[i] = (e.target as HTMLSelectElement).value; if (shown) void draw(true); } }, ...variableOptions(custom[i], !!offScene()))))));
+    }
+    if (mode === 'strata' || mode === 'rules') {
+      const alphaOut = h('output', {}, `${Math.round(tintAlpha * 100)} %`);
+      el.append(h('div', { class: 'row' },
+        h('label', { class: 'row' }, 'Show as ', h('select', { onchange: (e: Event) => { display = (e.target as HTMLSelectElement).value as typeof display; saveSources(); if (shown) void draw(false); else render(); } },
+          h('option', { value: 'classes', selected: display === 'classes' }, 'Classes'),
+          h('option', { value: 'tint', selected: display === 'tint', disabled: !orthoService(orthoId) }, 'Tint over the orthophoto (4th band)'))),
+        display === 'tint' ? h('label', { class: 'row grow' }, 'Tint ', h('input', { type: 'range', min: '0.1', max: '0.9', step: '0.05', value: String(tintAlpha), 'aria-label': 'Tint strength',
+          oninput: (e: Event) => { tintAlpha = +(e.target as HTMLInputElement).value; alphaOut.textContent = `${Math.round(tintAlpha * 100)} %`; },
+          onchange: () => { saveSources(); if (shown) void draw(false); } }), alphaOut) : null));
     }
     if (mode === 'strata') el.append(strataEditor({
       scheme, leafOff: !!offScene(), panel: panelEl, say,
@@ -427,7 +474,11 @@ export function initFusion(ctx: Ctx) {
 
     if (shown && product && panel) {
       const s = scene(), l = lidar(), o = offScene();
-      if (s && l) el.append(h('p', { class: 'note small' }, `LiDAR ${l.datetime ? fmtDate(l.datetime) : '(undated)'} · leaf-on ${fmtDate(s.datetime)}${o ? ` · leaf-off ${fmtDate(o.datetime)}` : ''}. Anything built, cleared or grown between the dates reads wrongly, and the imagery is 10–20 m against the LiDAR's 1 m.`));
+      const usesOrtho = product.inputs.some(k => k.startsWith('ortho:')), usesPc = product.inputs.some(k => k.startsWith('pc:'));
+      const svc = orthoService(orthoId);
+      if (s && l) el.append(h('p', { class: 'note small' }, `LiDAR ${l.datetime ? fmtDate(l.datetime) : '(undated)'} · leaf-on ${fmtDate(s.datetime)}${o ? ` · leaf-off ${fmtDate(o.datetime)}` : ''}${usesOrtho && svc ? ` · orthophoto ${photoYear || '(date not stated)'}` : ''}. Anything built, cleared or grown between the dates reads wrongly, and the imagery is 10–20 m against the LiDAR's 1 m.`));
+      if (usesOrtho && svc) el.append(h('p', { class: 'muted small' }, `${svc.attribution}. Computed in your browser from the tiles the service serves; proof of concept, not for redistribution.`));
+      if (usesPc) el.append(h('p', { class: 'muted small' }, 'Point-cloud metrics are per 2–16 m cell (by zoom) on the tiles\' own UTM grid; intensity is uncalibrated, so compare it within one acquisition.'));
       const legendPanel = panelEl('legend', product.render === 'classes' ? 'Classes (share of this view)' : 'Stretch', true);
       legendPanel.append(panel.el);
       if (product.render === 'classes') legendPanel.append(h('button', { class: 'chip', onclick: () => void panel?.refresh() }, 'Recount this view'));

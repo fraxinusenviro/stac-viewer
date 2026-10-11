@@ -91,3 +91,26 @@ test('ΔNDVI is leaf-on minus leaf-off NDVI', () => {
   const on = (0.4 - 0.04) / 0.44, off = (0.2 - 0.1) / 0.3;
   assert.ok(Math.abs(v.channel.fn(p, 0, defaultStyle(FUSION_PRODUCTS[0])) - (on - off)) < 1e-6);
 });
+
+import { tintProduct, variableById as vars2 } from '../src/products.ts';
+import { compileRuleSet } from '../src/rules.ts';
+
+test('tint: the photo where unclassified, the photo mixed with the class colour where classified', () => {
+  const base = compileRuleSet({ name: 't', maskClouds: false, rules: [{ label: 'Tall', colour: '#ff0000', when: [{ v: 'chm', op: '>=', a: 5 }] }] });
+  const t = tintProduct(base, 0.5);
+  assert.ok(t.inputs.includes('ortho:r') && t.inputs.includes('lidar:dsm'));
+  const planes = {
+    'lidar:dsm': Float32Array.of(20, 10), 'lidar:dtm': Float32Array.of(10, 10),
+    'ortho:r': Float32Array.of(100, 100), 'ortho:g': Float32Array.of(100, 100), 'ortho:b': Float32Array.of(100, 100),
+  };
+  const st = defaultStyle(t);
+  assert.deepEqual(t.channels.map(c => c.fn(planes, 0, st)), [177.5, 50, 50]);
+  assert.deepEqual(t.channels.map(c => c.fn(planes, 1, st)), [100, 100, 100]);
+  assert.equal(t.classOf!(planes, 0, st), 1);
+});
+
+test('point-cloud and orthophoto variables exist and read their planes', () => {
+  for (const id of ['pc_ivg', 'pc_pen', 'pc_att', 'o_exg', 'o_tex', 'ci6']) assert.ok(vars2.get(id), id);
+  const exg = vars2.get('o_exg')!.channel.fn({ 'ortho:r': Float32Array.of(50), 'ortho:g': Float32Array.of(100), 'ortho:b': Float32Array.of(50) }, 0, defaultStyle(FUSION_PRODUCTS[0]));
+  assert.ok(Math.abs(exg - 0.5) < 1e-9);
+});

@@ -3,6 +3,10 @@
 
 import type { InputSource } from './engine.ts';
 import type { HrdemItem, S2Item } from './stac.ts';
+import { PC_METRICS, type PcMetric } from './pointcloud/pcMetrics.ts';
+import type { XyzService } from './xyz.ts';
+
+const ORTHO_CHANNELS = ['r', 'g', 'b', 'tex'];
 
 /** HRDEM fills no-data with −32767; nothing this low is ground anywhere in Canada. */
 const HRDEM_NODATA = -32767;
@@ -22,6 +26,10 @@ export interface InputItems {
   /** The optional second, leaf-off scene. */
   s2b?: S2Item | null;
   lidar?: HrdemItem | null;
+  /** The orthophoto tile service (`ortho:*` inputs). */
+  ortho?: XyzService | null;
+  /** Whether point-cloud metrics (`pc:*` inputs) may be read. */
+  pointCloud?: boolean;
 }
 
 export function resolveInputs(inputs: string[], items: InputItems, opts: SourceOptions = { nodataAuto: true }): Record<string, InputSource> {
@@ -41,6 +49,16 @@ export function resolveInputs(inputs: string[], items: InputItems, opts: SourceO
       const href = rest === 'dsm' ? lidar.dsm : lidar.dtm;
       if (!href) throw new Error(`${lidar.id} has no ${rest.toUpperCase()}`);
       out[key] = { url: href, sample: 0, scale: 1, offset: 0, nodata: HRDEM_NODATA, minValid: -1000 };
+    } else if (kind === 'pc') {
+      if (!items.pointCloud) throw new Error('this product needs the LiDAR point cloud (switched off)');
+      if (!PC_METRICS.includes(rest as PcMetric)) throw new Error(`unknown point-cloud metric ${rest}`);
+      out[key] = { kind: 'pc', url: 'pc', metric: rest as PcMetric, sample: 0, scale: 1, offset: 0, nodata: null };
+    } else if (kind === 'ortho') {
+      const svc = items.ortho;
+      if (!svc) throw new Error('this product needs an orthophoto (choose one above)');
+      const ch = ORTHO_CHANNELS.indexOf(rest);
+      if (ch < 0) throw new Error(`unknown orthophoto channel ${rest}`);
+      out[key] = { kind: 'xyz', url: svc.template, maxZoom: svc.maxZoom, sample: ch, scale: 1, offset: 0, nodata: null };
     } else {
       throw new Error(`unknown input ${key}`);
     }

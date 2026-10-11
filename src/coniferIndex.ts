@@ -25,6 +25,12 @@
 //   − NIR (B08) 0.35 · − visible brightness 0.20 · − excess green 0.15
 //   − ΔNDVI (leaf-on − leaf-off) 0.35 · + leaf-off NDVI 0.20      (two scenes)
 //
+// The SIX-TERM variants put FieldMapper's own terms back, from the COPC point
+// cloud (pointcloud/) and a sub-metre orthophoto (xyz.ts), with FieldMapper's
+// weights: − vegetation intensity 0.35 · − ortho brightness 0.20 · − ortho
+// excess green 0.15 · + canopy attenuation 0.15 · + ortho crown texture 0.15 ·
+// − Sentinel-2 NIR 0.30 (in place of a four-band orthophoto's NIR).
+//
 // Pure apart from the calibration slots the variables read. Unit-tested.
 
 import type { Channel, Planes, Variable } from './products.ts';
@@ -82,7 +88,14 @@ export function bimodality(values: number[]): number {
 
 // ── Terms ───────────────────────────────────────────────────────────────────
 
-export interface CiOptions { leafOff: boolean; sharpened: boolean }
+export interface CiOptions {
+  leafOff: boolean;
+  sharpened: boolean;
+  /** FieldMapper's two point-cloud terms: vegetation intensity (−0.35) and canopy attenuation (+0.15). */
+  pointCloud?: boolean;
+  /** Brightness and excess green from the sub-metre orthophoto instead of Sentinel-2, plus crown texture (+0.15). */
+  ortho?: boolean;
+}
 
 interface Term { id: string; label: string; weight: number; sign: 1 | -1; value: (p: Planes, i: number) => number }
 
@@ -93,26 +106,45 @@ function termsFor(o: CiOptions): { terms: Term[]; woody: (p: Planes, i: number) 
   const k = (scene: 's2' | 's2b', a: string) => `${o.sharpened ? 'u:' : ''}${scene}:${a}`;
   const val = (p: Planes, key: string, i: number) => { const x = p[key][i]; return x > 0 ? x : x === x ? 0 : NaN; };
   const ndvi = (p: Planes, i: number, sc: 's2' | 's2b') => { const n = val(p, k(sc, 'nir'), i), r = val(p, k(sc, 'red'), i); return n + r >= 0.01 ? (n - r) / (n + r) : NaN; };
-  const terms: Term[] = [
-    { id: 'nir', label: 'NIR (B08)', weight: 0.35, sign: -1, value: (p, i) => val(p, k('s2', 'nir'), i) },
-    { id: 'brightness', label: 'Visible brightness', weight: 0.2, sign: -1, value: (p, i) => (val(p, k('s2', 'red'), i) + val(p, k('s2', 'green'), i) + val(p, k('s2', 'blue'), i)) / 3 },
-    {
-      id: 'greenness', label: 'Excess green', weight: 0.15, sign: -1,
-      value: (p, i) => { const r = val(p, k('s2', 'red'), i), g = val(p, k('s2', 'green'), i), b = val(p, k('s2', 'blue'), i), s = r + g + b; return s > 0.005 ? (2 * g - r - b) / s : NaN; },
-    },
-  ];
+  // With either of FieldMapper's other evidence sources the weights are its
+  // own (NIR 0.30); Sentinel-2 alone keeps the 0.35 the adaptation gave NIR.
+  const full = !!(o.pointCloud || o.ortho);
+  const terms: Term[] = [{ id: 'nir', label: 'NIR (Sentinel-2 B08)', weight: full ? 0.3 : 0.35, sign: -1, value: (p, i) => val(p, k('s2', 'nir'), i) }];
+  if (o.ortho) {
+    const at = (p: Planes, c: string, i: number) => p[`ortho:${c}`][i];
+    terms.push(
+      { id: 'brightness', label: 'Ortho brightness', weight: 0.2, sign: -1, value: (p, i) => (at(p, 'r', i) + at(p, 'g', i) + at(p, 'b', i)) / 765 },
+      { id: 'greenness', label: 'Ortho excess green', weight: 0.15, sign: -1, value: (p, i) => { const r = at(p, 'r', i), g = at(p, 'g', i), b = at(p, 'b', i), s = r + g + b; return s >= 15 ? (2 * g - r - b) / s : NaN; } },
+      { id: 'texture', label: 'Ortho crown texture', weight: 0.15, sign: 1, value: (p, i) => at(p, 'tex', i) },
+    );
+  } else {
+    terms.push(
+      { id: 'brightness', label: 'Visible brightness', weight: 0.2, sign: -1, value: (p, i) => (val(p, k('s2', 'red'), i) + val(p, k('s2', 'green'), i) + val(p, k('s2', 'blue'), i)) / 3 },
+      {
+        id: 'greenness', label: 'Excess green', weight: 0.15, sign: -1,
+        value: (p, i) => { const r = val(p, k('s2', 'red'), i), g = val(p, k('s2', 'green'), i), b = val(p, k('s2', 'blue'), i), s = r + g + b; return s > 0.005 ? (2 * g - r - b) / s : NaN; },
+      },
+    );
+  }
+  if (o.pointCloud) {
+    terms.push(
+      { id: 'intensity', label: 'LiDAR vegetation intensity', weight: 0.35, sign: -1, value: (p, i) => p['pc:ivg'][i] },
+      { id: 'attenuation', label: 'LiDAR canopy attenuation', weight: 0.15, sign: 1, value: (p, i) => p['pc:att'][i] },
+    );
+  }
   if (o.leafOff) {
     terms.push(
       { id: 'd_ndvi', label: 'ΔNDVI (leaf-on − leaf-off)', weight: 0.35, sign: -1, value: (p, i) => ndvi(p, i, 's2') - ndvi(p, i, 's2b') },
       { id: 'ndvi_off', label: 'Leaf-off NDVI', weight: 0.2, sign: 1, value: (p, i) => ndvi(p, i, 's2b') },
     );
   }
-  const bands = ['nir', 'red', 'green', 'blue'];
+  const bands = o.ortho ? ['nir', 'red'] : ['nir', 'red', 'green', 'blue'];
   const imagery = [...bands.map(b => `s2:${b}`), ...(o.leafOff ? ['s2b:nir', 's2b:red'] : [])];
+  const extra = [...(o.pointCloud ? ['pc:ivg', 'pc:att'] : []), ...(o.ortho ? ['ortho:r', 'ortho:g', 'ortho:b', 'ortho:tex'] : [])];
   return {
     terms,
     woody: (p, i) => { const d = p['lidar:dsm'][i] - p['lidar:dtm'][i]; return d >= WOODY_MIN_M && ndvi(p, i, 's2') >= WOODY_MIN_NDVI; },
-    inputs: ['lidar:dsm', 'lidar:dtm', ...imagery],
+    inputs: ['lidar:dsm', 'lidar:dtm', ...imagery, ...extra],
     sharpenKeys: o.sharpened ? imagery : [],
   };
 }
@@ -177,6 +209,8 @@ export const CI_VARIANTS: { id: string; label: string; options: CiOptions }[] = 
   { id: 'ci2', label: 'Conifer index (leaf-on + leaf-off)', options: { leafOff: true, sharpened: false } },
   { id: 's_ci', label: 'Conifer index (one scene) · sharpened', options: { leafOff: false, sharpened: true } },
   { id: 's_ci2', label: 'Conifer index (leaf-on + leaf-off) · sharpened', options: { leafOff: true, sharpened: true } },
+  { id: 'ci6', label: 'Conifer index — six terms (LiDAR intensity + attenuation, orthophoto, Sentinel NIR)', options: { leafOff: false, sharpened: false, pointCloud: true, ortho: true } },
+  { id: 'ci6b', label: 'Conifer index — six terms + leaf-off', options: { leafOff: true, sharpened: false, pointCloud: true, ortho: true } },
 ];
 
 export function ciInputs(o: CiOptions) { const t = termsFor(o); return { inputs: t.inputs, sharpenKeys: t.sharpenKeys }; }
