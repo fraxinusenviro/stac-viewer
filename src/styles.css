@@ -92,6 +92,20 @@ details.panel[open] > summary { margin-bottom: 6px; }
 .on-map details { display: flex; flex-direction: column; gap: 6px; }
 
 .panel select { max-width: 100%; min-width: 0; }
+.relief { display: flex; flex-direction: column; gap: 4px; }
+.relief input[type=range] { flex: 1; }
+#basemap-controls { display: flex; flex-direction: column; gap: 4px; }
+#basemap-controls:empty { display: none; }
+.matrix { border-collapse: separate; border-spacing: 2px; font-size: 11px; width: 100%; table-layout: fixed; font-variant-numeric: tabular-nums; }
+.matrix th { font-weight: 600; text-align: left; vertical-align: bottom; padding: 2px; font-size: 10px; line-height: 1.15; overflow-wrap: anywhere; }
+.matrix thead th:first-child { width: 28%; }
+.matrix tbody th { vertical-align: middle; font-size: 11px; }
+.matrix td { height: 24px; text-align: center; border-radius: 3px; padding: 0; font-weight: 600; font-size: 11px; }
+.strata-row { display: grid; grid-template-columns: 1fr 60px 60px 30px; gap: 4px; align-items: center; }
+.strata-row input { min-width: 0; width: 100%; }
+.allowed { display: flex; flex-wrap: wrap; gap: 4px; font-size: 12px; }
+.allowed label { display: flex; align-items: center; gap: 3px; border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
+.pane h3.sub { font-size: 13px; font-weight: 700; margin: 10px 0 2px; }
 .check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .check input { flex: none; width: 18px; height: 18px; margin: 0; }
 .rule { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; }

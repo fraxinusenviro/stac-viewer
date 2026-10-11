@@ -60,3 +60,11 @@ test('a padded tile grid puts the pad outside the tile', () => {
   assert.equal(g.w, TILE + 2);
   assert.deepEqual(g.lonLat(1, 1), tileToLonLat(2, 2, 3));
 });
+
+test('hillshade Z-factor steepens a slope (darker away from the sun)', () => {
+  const w = 5, hgt = 5;
+  const ramp = new Float32Array(w * hgt);
+  for (let r = 0; r < hgt; r++) for (let c = 0; c < w; c++) ramp[r * w + c] = c * 0.5; // rising to the east, lit from the NW
+  const one = hillshade(ramp, w, hgt, 1, 315, 45, 1)[4], five = hillshade(ramp, w, hgt, 1, 315, 45, 5)[4];
+  assert.ok(five < one, `${five} < ${one}`);
+});

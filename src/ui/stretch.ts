@@ -104,7 +104,35 @@ export function stretchPanel(host: StretchHost): StretchPanel {
     rampLegend.update();
   }
 
-  if (p.classes) {
+  if (p.classes && p.matrix) {
+    const m = p.matrix;
+    const colour = new Map(p.classes.map(c => [c.value, c.colour]));
+    // Each cell is painted its class colour with the share printed on it, in
+    // black or white by the colour's lightness: a matrix to be read at a glance.
+    const ink = (hex = '#888888') => {
+      const [r, g, b] = [1, 3, 5].map(k => parseInt(hex.slice(k, k + 2), 16));
+      return 0.299 * r + 0.587 * g + 0.114 * b > 140 ? '#111' : '#fff';
+    };
+    const cell = (v: number) => {
+      const share = h('span', { class: 'share' });
+      shares.set(v, share);
+      const c = colour.get(v);
+      return h('td', { title: p.classes!.find(k => k.value === v)?.label ?? '', style: `background:${c};color:${ink(c)}` }, share);
+    };
+    const table = h('table', { class: 'matrix' },
+      h('thead', {}, h('tr', {}, h('th', {}, ''), ...m.cols.map(c => h('th', {}, c.label, h('br', {}), h('span', { class: 'muted' }, c.range))))),
+      h('tbody', {},
+        ...m.rows.map((r, ri) => h('tr', {}, h('th', {}, r.label), ...m.cols.map((_, ci) => cell(m.value(ri, ci))))),
+        ...(m.unclassified ? [h('tr', { class: 'muted' }, h('th', {}, 'Unclassified'), ...m.cols.map((_, ci) => cell(m.unclassified!(ci))))] : [])));
+    el.append(h('div', { class: 'cmp-wrap' }, table));
+    const masked = p.classes.find(c => c.value === 255);
+    if (masked) {
+      const share = h('span', { class: 'muted share' });
+      shares.set(255, share);
+      el.append(h('ul', { class: 'legend' }, h('li', {}, h('span', { class: 'swatch', style: `--c:${masked.colour}` }), h('span', { class: 'grow' }, masked.label), share)));
+    }
+    el.append(h('p', { class: 'muted small' }, 'Each cell: its share (%) of the classified pixels in view, in the colour it is drawn. Rows are cover types, columns height strata.'));
+  } else if (p.classes) {
     const list = h('ul', { class: 'legend' });
     for (const c of p.classes) {
       const share = h('span', { class: 'muted share' });
@@ -113,6 +141,8 @@ export function stretchPanel(host: StretchHost): StretchPanel {
     }
     el.append(list);
   }
+
+  if (p.render === 'relief') el.append(reliefControls(host.style, host.apply));
 
   if (hasCurve(p)) {
     const curve = h('select', { 'aria-label': 'Stretch curve', onchange: (e: Event) => { host.style.curve = (e.target as HTMLSelectElement).value as Curve; host.apply(); } },
@@ -129,7 +159,7 @@ export function stretchPanel(host: StretchHost): StretchPanel {
   const refresh = async () => {
     last = await host.stats().catch(() => null);
     canvases.forEach((_, c) => drawHist(c));
-    if (p.classes) for (const [v, el2] of shares) { const f = last?.classes?.get(v); el2.textContent = f ? `${(f * 100).toFixed(f < 0.01 ? 1 : 0)} %` : ''; }
+    if (p.classes) for (const [v, el2] of shares) { const f = last?.classes?.get(v); el2.textContent = f ? (p.matrix ? `${(f * 100).toFixed(f < 0.01 ? 1 : 0)}` : `${(f * 100).toFixed(f < 0.01 ? 1 : 0)} %`) : ''; }
   };
   const seed = async () => {
     await refresh();
@@ -145,4 +175,29 @@ export function stretchPanel(host: StretchHost): StretchPanel {
 export function mount(slot: HTMLElement, panel: StretchPanel | null) {
   clear(slot);
   if (panel) slot.append(panel.el);
+}
+
+/** Z-factor and sun azimuth, for anything drawn as relief. */
+export function reliefControls(style: { zFactor: number; azimuth: number }, apply: () => void): HTMLElement {
+  const zOut = h('output', {}, `× ${style.zFactor}`);
+  const aOut = h('output', {}, `${style.azimuth}°`);
+  return h('div', { class: 'relief' },
+    h('label', { class: 'row' }, 'Z-factor ',
+      h('input', {
+        type: 'range', min: '0', max: '1', step: '0.01', value: String(Math.log10(style.zFactor) / Math.log10(20)), 'aria-label': 'Z-factor',
+        oninput: (e: Event) => { style.zFactor = zFromSlider(+(e.target as HTMLInputElement).value); zOut.textContent = `× ${style.zFactor}`; },
+        onchange: () => apply(),
+      }), zOut),
+    h('label', { class: 'row' }, 'Sun azimuth ',
+      h('input', {
+        type: 'range', min: '0', max: '360', step: '15', value: String(style.azimuth), 'aria-label': 'Sun azimuth',
+        oninput: (e: Event) => { style.azimuth = +(e.target as HTMLInputElement).value; aOut.textContent = `${style.azimuth}°`; },
+        onchange: () => apply(),
+      }), aOut));
+}
+
+/** The Z-factor slider is logarithmic, 1 to 20 (0 → ×1, 1 → ×20), rounded to a value a person would type. */
+export function zFromSlider(t: number): number {
+  const z = Math.pow(20, Math.min(1, Math.max(0, t)));
+  return z < 3 ? Math.round(z * 4) / 4 : z < 10 ? Math.round(z * 2) / 2 : Math.round(z);
 }

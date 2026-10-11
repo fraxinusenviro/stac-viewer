@@ -19,6 +19,31 @@ The approach follows [taylor-geospatial/s2-stac-geoparquet](https://github.com/t
 a static index on object storage, a pure-JS parquet reader instead of DuckDB-WASM, `cache: "no-store"`
 range reads, and client-side COG warping through a proj4 control grid.
 
+## Strata × cover classes
+
+The default Fusion product classifies every pixel on **two axes**, as vegetation is described in the field:
+
+- **Height stratum** from the canopy height model, with editable bands. Defaults: groundcover < 0.1 m ·
+  herbaceous/forb 0.1–0.5 · low shrub 0.5–2 · high shrub 2–8 · forest > 8 m.
+- **Cover type** from spectral rules (any variable, AND-ed). Each cover type lists the **strata it may occur in**:
+  coniferous in low shrub, high shrub and forest; broadleaf in all five; water and bare only low.
+
+A pixel takes the first cover type whose conditions hold **and** that allows its stratum, so a conifer-like spectrum at
+0.3 m falls through to the next cover type that fits. The class is the pair ("Coniferous · high shrub"), drawn in the cover's
+colour shaded by stratum. The legend is a matrix (cover × stratum) showing each cell's share of the view. Unclaimed pixels
+can be shown by stratum in grey. Schemes are saved in the browser and import/export as JSON.
+
+Limits: the CHM is the **top surface**, so a pixel is classed by its tallest layer, and shrubs under a forest canopy are not seen
+(that needs the point cloud's vertical profile). DSM − DTM carries ~0.1–0.2 m of noise, and low herbs are often classified
+as ground by the provider, so boundaries below ~0.5 m lean on the cover rules.
+
+## Hillshade basemap
+
+The basemap can be a hillshade of the NRCan HRDEM **national mosaic**: DTM (bare earth) or DSM (surface), with an
+adjustable **Z-factor** (×1–×20) and sun azimuth. The mosaic is ~56 regional COGs, so the tiles meeting the view are looked
+up and drawn as you pan (1 m where it exists, 2 m elsewhere, from zoom 8). The light basemap stays underneath, outside
+coverage. The same Z-factor and azimuth controls appear on every hillshade layer in the Rasters tab.
+
 ## Rule-based classes
 
 A rule set is an ordered list of rules. Each rule has a class name, a colour and conditions on any variable (canopy

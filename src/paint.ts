@@ -105,6 +105,10 @@ export interface PaintSpec {
   ramp?: string[];
   /** relief: plain hillshade, or the ramp lit by it. */
   relief?: 'hillshade' | 'shaded';
+  /** Relief exaggeration (1 = true). */
+  zFactor?: number;
+  /** Sun azimuth, degrees clockwise from north (default 315, the north-west). */
+  azimuth?: number;
   classes?: { value: number; colour: string }[];
   /** rgb: paint a pixel with SOME channels missing (those dark); only all-missing is transparent. */
   partial?: boolean;
@@ -136,7 +140,7 @@ export function paint(chan: Float32Array[], size: number, pad: number, spec: Pai
     const [lo, hi] = spec.ranges[0];
     const scale = 255 / ((hi - lo) || 1e-9);
     const table = rampTable(spec.ramp ?? ['#000000', '#ffffff']);
-    const hs = spec.render === 'relief' ? hillshade(chan[0], size, size, cellM) : null;
+    const hs = spec.render === 'relief' ? hillshade(chan[0], size, size, cellM, spec.azimuth ?? 315, 45, spec.zFactor ?? 1) : null;
     for (let i = 0; i < N; i++) {
       const v = chan[0][idx(i)];
       if (v !== v) continue;

@@ -12,6 +12,7 @@ import type { Ctx } from './tabs/ctx.ts';
 import { initRasters } from './tabs/rasters.ts';
 import { initImagery } from './tabs/imagery.ts';
 import { initFusion } from './tabs/fusion.ts';
+import { BASE_ANCHOR, initBasemap } from './tabs/basemap.ts';
 
 interface Project {
   id: string; label: string; jurisdiction: string; year: number; crs: string; verticalDatum: string;
@@ -82,6 +83,7 @@ map.on('load', async () => {
   map.addSource('hrdem-footprints', { type: 'geojson', data: empty });
   map.addSource('coverage', { type: 'geojson', data: DATA + 'lidar-coverage.geojson' });
   map.addSource('tiles', { type: 'geojson', data: empty, promoteId: 'id' });
+  map.addLayer({ id: BASE_ANCHOR, type: 'background', layout: { visibility: 'none' } });
   map.addLayer({ id: 'anchor-elev', type: 'background', layout: { visibility: 'none' } });
   map.addLayer({ id: 'anchor-fusion', type: 'background', layout: { visibility: 'none' } });
   map.addLayer({ id: 'anchor-lidar', type: 'background', layout: { visibility: 'none' } });
@@ -123,10 +125,6 @@ document.querySelectorAll<HTMLButtonElement>('.tab').forEach(btn => btn.addEvent
   if (activeTab === 'pc') scheduleLidarSearch();
 }));
 
-document.getElementById('basemap')!.addEventListener('change', (e) => {
-  const v = (e.target as HTMLSelectElement).value;
-  for (const k of Object.keys(BASEMAPS)) map.setLayoutProperty(`bm-${k}`, 'visibility', k === v ? 'visible' : 'none');
-});
 
 // ── Point clouds (CanElevation COPC) ────────────────────────────────────────
 
@@ -253,6 +251,7 @@ function areaKm2Of(t: LidarTile) {
 // ── The other tabs ──────────────────────────────────────────────────────────
 
 const ctx: Ctx = { map, say, viewBox };
+initBasemap(ctx, Object.keys(BASEMAPS));
 initRasters(ctx);
 initImagery(ctx);
 initFusion(ctx);

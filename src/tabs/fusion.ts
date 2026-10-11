@@ -27,26 +27,21 @@ import {
 import { compareLabels, niceThreshold, type Sample } from '../compare.ts';
 import { CI_VARIANTS, calibrate, calibrations, ciInputs, type Calibration } from '../coniferIndex.ts';
 import { DEFAULT_UNMIX } from '../unmix.ts';
+import { compileScheme, defaultScheme, parseScheme, type StrataScheme } from '../strata.ts';
+import { strataEditor } from './strataEditor.ts';
 import { resolveInputs } from '../sources.ts';
 import { searchS2, type HrdemItem, type S2Item } from '../stac.ts';
 import { stretchPanel, type StretchPanel } from '../ui/stretch.ts';
 import { findHrdem } from './rasters.ts';
 import { ANCHOR, itemName, shared, type Ctx } from './ctx.ts';
+import { variableOptions } from '../ui/variables.ts';
 
 const LAYER = 'fusion';
-const LS_RULES = 'sv.rules', LS_SAMPLES = 'sv.samples';
+const LS_RULES = 'sv.rules', LS_SAMPLES = 'sv.samples', LS_STRATA = 'sv.strata';
 const SAMPLE_COLOURS = ['#e66101', '#5e3c99'];
 
 const load = <T>(k: string, fallback: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) as T : fallback; } catch { return fallback; } };
 const save = (k: string, v: unknown) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } };
-
-/** Variable picker options, grouped. */
-function variableOptions(selected: string, leafOff: boolean) {
-  const groups = new Map<string, Variable[]>();
-  for (const v of FUSION_VARIABLES) (groups.get(v.group) ?? groups.set(v.group, []).get(v.group)!).push(v);
-  return [...groups].map(([g, vs]) => h('optgroup', { label: needsLeafOff(vs[0]) && !leafOff ? `${g} (needs a leaf-off scene)` : g },
-    ...vs.map(v => h('option', { value: v.id, selected: v.id === selected }, v.label))));
-}
 
 export function initFusion(ctx: Ctx) {
   const { map, say } = ctx;
@@ -66,7 +61,8 @@ export function initFusion(ctx: Ctx) {
   let sceneId: string | null = null;
   let offId = '';
   let leafOffScenes: S2Item[] = [];
-  let mode: 'fusion-sgw' | 'fusion-sharp-fcir' | 'custom' | 'rules' = 'rules';
+  let mode: 'fusion-sgw' | 'fusion-sharp-fcir' | 'custom' | 'rules' | 'strata' = 'strata';
+  let scheme: StrataScheme = (() => { try { return parseScheme(load(LS_STRATA, null)); } catch { return defaultScheme(); } })();
   let ciVariant = 'ci';
   let ciReport: Calibration | null = null;
   let custom: [string, string, string] = ['chm', 'ndvi', 'swir16'];
@@ -125,12 +121,13 @@ export function initFusion(ctx: Ctx) {
   // ── Drawing ───────────────────────────────────────────────────────────────
 
   const productFor = (): Product =>
-    mode === 'rules' ? compileRuleSet(rules) : mode === 'custom' ? customFusionProduct(custom) : FUSION_PRODUCTS.find(p => p.id === mode)!;
+    mode === 'strata' ? compileScheme(scheme) : mode === 'rules' ? compileRuleSet(rules) : mode === 'custom' ? customFusionProduct(custom) : FUSION_PRODUCTS.find(p => p.id === mode)!;
 
   async function draw(reseed: boolean) {
-    const p = productFor();
+    let p: Product;
+    try { p = productFor(); } catch (e) { say(`Cannot draw: ${(e as Error).message}.`, 'error'); return; }
     if (mode === 'rules' && !rules.rules.some(r => !r.off && r.when.length)) { say('Add a rule with at least one condition first.', 'error'); return; }
-    const keep = !reseed && style && product && product.render === p.render && product.channels.length === p.channels.length && (mode === 'rules' || product.id === p.id);
+    const keep = !reseed && style && product && product.render === p.render && product.channels.length === p.channels.length && (mode === 'rules' || mode === 'strata' || product.id === p.id);
     product = p;
     style = keep ? style! : defaultStyle(p);
     try {
@@ -153,6 +150,16 @@ export function initFusion(ctx: Ctx) {
     if (!redraw || mode !== 'rules' || !shown) return;
     clearTimeout(ruleTimer);
     ruleTimer = window.setTimeout(() => void draw(false), 350);
+  }
+
+  let schemeTimer = 0;
+  /** The strata scheme changed: save it; re-render the editor if its shape changed; repaint (debounced). */
+  function schemeChanged(structural: boolean) {
+    save(LS_STRATA, scheme);
+    if (structural) render();
+    if (mode !== 'strata' || !shown) return;
+    clearTimeout(schemeTimer);
+    schemeTimer = window.setTimeout(() => void draw(false), 350);
   }
 
   // ── Samples ───────────────────────────────────────────────────────────────
@@ -398,6 +405,7 @@ export function initFusion(ctx: Ctx) {
     el.append(h('button', { class: 'btn wide', onclick: () => void findInputs() }, 'Find inputs for this view'));
     el.append(renderInputs());
     el.append(h('label', { class: 'field' }, 'Product', h('select', { onchange: (e: Event) => { mode = (e.target as HTMLSelectElement).value as typeof mode; if (shown) void draw(true); else render(); } },
+      h('option', { value: 'strata', selected: mode === 'strata' }, 'Strata × cover classes (editable)'),
       h('option', { value: 'rules', selected: mode === 'rules' }, 'Rule-based classes (editable)'),
       h('option', { value: 'fusion-sgw', selected: mode === 'fusion-sgw' }, FUSION_PRODUCTS[0].label),
       h('option', { value: 'fusion-sharp-fcir', selected: mode === 'fusion-sharp-fcir' }, FUSION_PRODUCTS.find(p => p.id === 'fusion-sharp-fcir')!.label),
@@ -407,7 +415,12 @@ export function initFusion(ctx: Ctx) {
       el.append(h('div', { class: 'rgbpick' }, ...(['Red', 'Green', 'Blue'] as const).map((c, i) => h('label', { class: 'field' }, c,
         h('select', { onchange: (e: Event) => { custom = [...custom] as [string, string, string]; custom[i] = (e.target as HTMLSelectElement).value; if (shown) void draw(true); } }, ...variableOptions(custom[i], !!offScene()))))));
     }
-    if (mode === 'rules') el.append(renderRuleEditor());
+    if (mode === 'strata') el.append(strataEditor({
+      scheme, leafOff: !!offScene(), panel: panelEl, say,
+      changed: schemeChanged,
+      replace: (next) => { scheme = next; schemeChanged(true); },
+    }));
+    else if (mode === 'rules') el.append(renderRuleEditor());
     else el.append(h('p', { class: 'muted small' }, productFor().note));
 
     el.append(h('button', { class: 'btn wide', onclick: () => void draw(true) }, shown ? 'Redraw' : 'Show on map'));

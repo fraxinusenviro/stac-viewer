@@ -110,8 +110,10 @@ export function chooseLevel(factors: number[], srcPerOutPixel: number): number {
 /**
  * Hillshade (Horn) of a padded elevation grid, value 0–1 per inner pixel, NaN
  * where any neighbour is missing. `w` includes the 1-pixel pad on each side.
+ * `zFactor` exaggerates relief (multiplies the slope gradients): 1 is true
+ * relief; 2–5 brings out subtle drainage and microtopography on flat ground.
  */
-export function hillshade(elev: ArrayLike<number>, w: number, h: number, cellM: number, azimuthDeg = 315, altitudeDeg = 45): Float32Array {
+export function hillshade(elev: ArrayLike<number>, w: number, h: number, cellM: number, azimuthDeg = 315, altitudeDeg = 45, zFactor = 1): Float32Array {
   const iw = w - 2, ih = h - 2;
   const out = new Float32Array(iw * ih);
   const az = ((360 - azimuthDeg + 90) * Math.PI) / 180;
@@ -122,8 +124,8 @@ export function hillshade(elev: ArrayLike<number>, w: number, h: number, cellM: 
       const a = e(-1, -1), b = e(-1, 0), cc = e(-1, 1), d = e(0, -1), f = e(0, 1), g = e(1, -1), hh = e(1, 0), i = e(1, 1);
       let v = NaN;
       if (Number.isFinite(a + b + cc + d + f + g + hh + i)) {
-        const dzdx = ((cc + 2 * f + i) - (a + 2 * d + g)) / (8 * cellM);
-        const dzdy = ((g + 2 * hh + i) - (a + 2 * b + cc)) / (8 * cellM);
+        const dzdx = (zFactor * ((cc + 2 * f + i) - (a + 2 * d + g))) / (8 * cellM);
+        const dzdy = (zFactor * ((g + 2 * hh + i) - (a + 2 * b + cc))) / (8 * cellM);
         const slope = Math.atan(Math.hypot(dzdx, dzdy));
         const aspect = Math.atan2(dzdy, -dzdx);
         v = Math.cos(zen) * Math.cos(slope) + Math.sin(zen) * Math.sin(slope) * Math.cos(az - aspect);

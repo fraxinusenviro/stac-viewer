@@ -52,6 +52,9 @@ export interface ProductStyle {
   curve: Curve;
   gamma: number;
   thresholds: Thresholds;
+  /** Relief products: exaggeration and sun azimuth. */
+  zFactor: number;
+  azimuth: number;
 }
 
 export interface Product {
@@ -70,6 +73,13 @@ export interface Product {
   pad: number;
   /** RGB: a pixel with one channel missing still paints (that channel dark). For fusion, where an index can be undefined over dark water while the others are not. */
   partial?: boolean;
+  /** Two-axis classes (strata × cover): how the legend lays the classes out as a table. */
+  matrix?: {
+    rows: { label: string; colour: string }[];
+    cols: { label: string; range: string }[];
+    value: (row: number, col: number) => number;
+    unclassified?: (col: number) => number;
+  };
   /** Sharpen these imagery inputs with the CHM before the channels are computed (unmix.ts); channels read them as `u:<key>`. */
   sharpen?: { keys: string[]; params: UnmixParams };
   /** One line under the picker: what the product is, and its formula. */
@@ -380,7 +390,7 @@ export function customFusionProduct(ids: [string, string, string]): Product {
 
 /** The paint spec for a product under a style. */
 export function paintSpec(p: Product, s: ProductStyle): PaintSpec {
-  return { render: p.render, ranges: s.ranges, curve: s.curve, gamma: s.gamma, ramp: p.ramp, relief: p.relief, classes: p.classes, partial: p.partial };
+  return { render: p.render, ranges: s.ranges, curve: s.curve, gamma: s.gamma, ramp: p.ramp, relief: p.relief, classes: p.classes, partial: p.partial, zFactor: s.zFactor, azimuth: s.azimuth };
 }
 
 /** Whether a product exposes a stretch (range handles). */
@@ -391,7 +401,7 @@ export const hasCurve = (p: Product) => !p.identity && (p.render === 'rgb' || p.
 export function defaultStyle(p: Product): ProductStyle {
   return {
     ranges: p.channels.map(c => (Array.isArray(c.seed) ? [...c.seed] as [number, number] : [0, 1])),
-    curve: 'linear', gamma: 1, thresholds: { ...DEFAULT_THRESHOLDS },
+    curve: 'linear', gamma: 1, thresholds: { ...DEFAULT_THRESHOLDS }, zFactor: 1, azimuth: 315,
   };
 }
 

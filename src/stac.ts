@@ -203,3 +203,13 @@ export async function searchS2(q: S2Query, signal?: AbortSignal): Promise<S2Item
   if (!r.ok) throw new Error(`Earth Search answered HTTP ${r.status}`);
   return parseS2(await r.json());
 }
+
+/** The HRDEM national-mosaic tiles meeting a box: 1 m where any exists, else 2 m. */
+export async function searchHrdemMosaic(b: LonLatBox, signal?: AbortSignal): Promise<HrdemItem[]> {
+  const url = `${HRDEM_STAC}/search?collections=hrdem-mosaic-1m,hrdem-mosaic-2m&bbox=${bboxParam(b)}&limit=50`;
+  const r = await fetch(url, { signal });
+  if (!r.ok) throw new Error(`NRCan STAC answered HTTP ${r.status}`);
+  const items = parseHrdem(await r.json());
+  const one = items.filter(i => i.kind === 'mosaic-1m');
+  return one.length ? one : items.filter(i => i.kind === 'mosaic-2m');
+}

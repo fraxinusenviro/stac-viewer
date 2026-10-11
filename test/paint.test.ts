@@ -54,3 +54,9 @@ test('partial rgb paints a pixel with one channel missing; strict rgb does not',
   const out = paint(ch, size, 0, { ...spec, partial: true }, 1);
   assert.equal(out[3], 255); assert.equal(out[2], 0);
 });
+
+import { zFromSlider } from '../src/ui/stretch.ts';
+test('the Z-factor slider runs ×1 to ×20 with typeable steps', () => {
+  assert.equal(zFromSlider(0), 1); assert.equal(zFromSlider(1), 20);
+  assert.ok([1.5, 1.75, 2].includes(zFromSlider(0.2)));
+});
