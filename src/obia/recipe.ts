@@ -67,6 +67,8 @@ export const REFERENCE_SCALES: Record<string, { scale: number; unit: string; gro
 
 export interface SentinelSettings {
   itemId: string | null;
+  /** The optional second date (leaf-off or senescence). */
+  secondItemId?: string | null;
   bands: string[];
   indices: string[];
   /** SCL classes treated as invalid, and the dilation applied to cloud/shadow classes in SCL pixels. */
@@ -75,8 +77,8 @@ export interface SentinelSettings {
 }
 
 export const DEFAULT_SENTINEL: Omit<SentinelSettings, 'itemId'> = {
-  bands: ['blue', 'green', 'red', 'nir', 'swir16'],
-  indices: ['ndvi', 'ndmi'],
+  bands: ['blue', 'green', 'red', 'nir', 'rededge1', 'rededge2', 'rededge3', 'nir08', 'swir16'],
+  indices: ['ndvi', 'ndre', 'ndmi'],
   sclInvalid: [0, 1, 3, 8, 9, 10, 11],
   maskBufferPx: 1,
 };

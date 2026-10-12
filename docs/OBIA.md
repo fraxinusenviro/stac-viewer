@@ -82,6 +82,58 @@ Worker with progress and **Cancel**; the map stays usable throughout.
   reported from fewer than two folds. Held-out validation labels are never trained on or offered as uncertain objects.
 - Scores are vote shares, labelled "not calibrated probabilities" wherever they appear.
 
+## 4a. Vegetation composition (level 2)
+
+The class schema is a tree. Structural classes come first (forest > 8 m, shrub / regeneration 0.5–8 m, low vegetation
+< 0.5 m, water, built); under them sit composition classes:
+
+| Structural class | Composition classes |
+|---|---|
+| Forest | coniferous · broadleaf · mixed |
+| Shrub / regeneration | coniferous · broadleaf · tall ericaceous · mixed |
+| Low vegetation | graminoid · ericaceous dwarf shrub · moss / *Sphagnum* · lichen · conifer seedlings · broadleaf seedlings / forbs |
+
+Each class carries a description stating its definition and the evidence expected to separate it (`labels.ts`). An
+older flat schema gains the sub-classes with one button.
+
+**Two models** (`classify.ts`). Level 1 is fitted on every label, rolled up to its structural class. Level 2 is fitted
+separately for each structural class with at least two labelled sub-classes, only on objects carrying those labels,
+and is applied only to objects that level 1 puts in that class. A composition model therefore never has to tell
+meadow from forest, and a label at either level is useful. Each level has its own spatial cross-validation, ablation
+and held-out report. Level-2 figures are **conditional** on the structural class being right, and are labelled so. The
+predicted class is the deepest level available, with the structural prediction and both sets of vote shares beside it.
+
+**Evidence added for composition:**
+
+| Evidence | Features | Separates |
+|---|---|---|
+| A **second Sentinel-2 date** (spring leaf-off, late April–mid May; or autumn senescence, October–mid November) at native support | `s2b_*` bands and indices; `d_*` = main-date object mean − second-date object mean (NDVI, NDRE, NDMI, NIR, red, SWIR) | conifer vs broadleaf (broadleaf loses greenness, conifers keep it); graminoid (strong senescence); evergreen vs deciduous ericads |
+| **Red edge** (B05–B07, NDRE from B8A/B05, 20 m) | `s2_rededge*`, `s2_ndre` | leaf type and chlorophyll |
+| **Crown shape** from the CHM | `chm_apex` (height at a local maximum > 2 m minus the mean 2 m away: ~4 m for a cone, < 1 m for a dome), `chm_tops_ha`, `chm_rumple` | conifer vs broadleaf crowns at 1 m |
+| **Colour composition** from the photo | `lab_chroma`, `lab_hue`, `rgb_pale_frac` (L\* > 65, C\* < 15), `rgb_red_frac` (a\* > 10) | lichen (pale grey), ericaceous / red *Sphagnum* (reddish in autumn), graminoid (straw hue) |
+| **Conifer score** (`composition.ts`) | `conifer_score`: FieldMapper's conifer-index method on objects — robust z-scores of −Δ NDVI, + leaf-off NDVI, − leaf-on NIR, − NDRE, − photo L\*, − excess green, + photo texture, + apex sharpness over the woody objects of the run, averaged by weight; Otsu split and Sarle's bimodality reported | a predictor and a map view, never a label (labels made from it would be validated against itself); relative to the run |
+
+The ablation's "without Sentinel" set also drops the conifer score, which Sentinel informs.
+
+**What to expect.** These are the separations the evidence supports, roughly in decreasing reliability:
+
+1. **Coniferous vs broadleaf forest, stand scale** — reliable with a leaf-off scene (the seasonal NDVI change is the
+   strongest single signal). Without one, leaf-on NIR, photo colour and crown apices still separate them, less cleanly.
+   Tamarack drops its needles and reads as broadleaf in a leaf-off scene.
+2. **Mixed** — defined by proportion (neither type ≥ 75 % of canopy), so it is learned from labels. A 10 m Sentinel
+   pixel over a fine object is itself a mixture: expect intermediate values and conifer scores near the split, and expect
+   "mixed" to be the least accurate forest class. A sub-object (per-crown) composition is not built.
+3. **Lichen** — pale and flat; usually separable where a photo exists and patches are larger than a few photo pixels.
+4. **Graminoid vs ericaceous heath** — separable with an autumn or spring second date and a photo; hard from one summer
+   scene. The CHM does not separate them: below ~0.5 m LiDAR height noise (0.1–0.2 m) is the same size as the vegetation.
+5. **Moss / *Sphagnum* vs wet graminoid** — the hardest pair; moisture (NDMI) and little seasonal change help, but
+   expect confusion. Field labels are essential.
+6. **Conifer / broadleaf seedlings under 0.5 m** — rarely separable from the ground layer at 1 m. The classes exist so
+   that what is seen in the field can be recorded; do not expect the model to find them.
+
+Point-cloud intensity and penetration (the strongest structural evidence for leaf type in FieldMapper's index) are not
+yet read in this tab (Milestone B).
+
 ## 5. Exports
 
 | Export | Format | CRS |
@@ -110,9 +162,10 @@ refused before reading).
 
 ## 7. Test fixture
 
-`src/obia/fixture.ts` — **SYNTHETIC, not real data**: 240 × 160 m at 1 m with alternating forest and meadow stands,
-six ponds below the minimum patch area, a NoData corner, aligned 10 m and 20 m Sentinel rasters with a cloudy SCL
-pixel, and reference polygons. Used by the unit tests and by *Load the test fixture* in the Study area step. Its
+`src/obia/fixture.ts` — **SYNTHETIC, not real data**: 240 × 160 m at 1 m in four stands — coniferous forest (cone
+crowns), graminoid meadow, broadleaf forest (dome crowns), lichen over ericaceous heath — with six ponds below the minimum
+patch area, a NoData corner, aligned 10 m and 20 m Sentinel rasters for a leaf-on and a leaf-off date (a cloudy SCL pixel
+in the first), and reference polygons at the composition level. Its contrasts are deliberately clean. Used by the unit tests and by *Load the test fixture* in the Study area step. Its
 perfect scores are a property of a separable synthetic scene.
 
 ## 8. Tests (`npm test`)
@@ -123,6 +176,9 @@ missing pixels, indices, SCL masking, CHM band denominators, Sentinel independen
 classification with held-out validation) · `obiaSources` (STAC conformance, pagination, relative links, GET/POST
 fallback, range probe) · `obiaExport` (GeoTIFF read-back, RLE, bundle round trip, polygon areas vs object areas,
 Sentinel support after reload) · `obiaBudget`.
+
+`obiaComposition` (crown-shape and colour features, seasonal differences and their support, the conifer score, the
+class tree, two-level classification on the fixture).
 
 Acceptance criteria covered by tests: 1, 2, 3, 4, 5, 6, 9 (reload; split/merge is not built), 10, 11, 12 (partly:
 inaccessible URLs, servers ignoring ranges, authentication refusals, zero valid observations; the refusal of a

@@ -10,7 +10,8 @@
 import { projector } from './grid.ts';
 import { fineFeatureDefs, fineFeatures } from './features.ts';
 import { segment, segmentationChannels, type FinePlanes } from './segment.ts';
-import { areaWeighted, fineToNative, normalizedDifference, sclInvalid, sentinelFeatureDefs, S2_INDICES, type NativeRaster } from './sentinel.ts';
+import { areaWeighted, fineToNative, normalizedDifference, sclInvalid, seasonalDeltaDefs, sentinelFeatureDefs, SEASONAL_DELTAS, S2_INDICES, type NativeRaster } from './sentinel.ts';
+import { coniferScoreDef, scoreConifer, type ScoreReport } from './composition.ts';
 import type { SegmentParams } from './recipe.ts';
 import type { FeatureDefinition, ObjectRecord } from './types.ts';
 
@@ -37,6 +38,8 @@ export interface ObjectsJob {
   segmentationVersion: string;
   sources: { rgb: string | null; chm: string | null; dtm: string | null };
   sentinel?: SentinelInput | null;
+  /** An optional second date of the same kind (leaf-off or senescence), features prefixed `s2b_`. */
+  sentinelB?: SentinelInput | null;
 }
 
 export interface ObjectsResult {
@@ -48,6 +51,7 @@ export interface ObjectsResult {
   /** Per object, the ids of the COARSEST native pixels it touches (for leakage-safe folds). */
   coarsePixels: Int32Array[] | null;
   sentinelExact: boolean | null;
+  coniferScore: ScoreReport;
   stageMs: Record<string, number>;
 }
 
@@ -70,16 +74,33 @@ export function runObjects(job: ObjectsJob, progress: (stage: string) => void = 
   let coarsePixels: Int32Array[] | null = null, sentinelExact: boolean | null = null;
   if (job.sentinel && job.sentinel.rasters.length) {
     progress('Sentinel-2 at native support');
-    const r = sentinelStats(job, seg.labels, seg.count, objects);
+    const r = sentinelStats(job, job.sentinel, 's2', 'Sentinel-2', 'sentinel', seg.labels, seg.count, objects);
     featureDefs.push(...r.defs);
     coarsePixels = r.coarsePixels; sentinelExact = r.exact;
+    if (job.sentinelB && job.sentinelB.rasters.length) {
+      progress('Sentinel-2 second date at native support');
+      const b = sentinelStats(job, job.sentinelB, 's2b', 'Second date', 'sentinel_b', seg.labels, seg.count, objects);
+      featureDefs.push(...b.defs);
+      sentinelExact &&= b.exact;
+      // Both dates' pixels guard the folds; the second scene's ids are offset so the two cannot collide.
+      if (coarsePixels && b.coarsePixels) coarsePixels = coarsePixels.map((a, k) => Int32Array.from([...a, ...Array.from(b.coarsePixels![k], v => v + (1 << 28))]));
+      const deltas = seasonalDeltaDefs([job.sentinel.sourceId, job.sentinelB.sourceId]).filter(d => objects.length && d.parameters.a as string in objects[0].featureValues && d.parameters.b as string in objects[0].featureValues);
+      for (const o of objects) for (const k of SEASONAL_DELTAS) {
+        const a = o.featureValues[`s2_${k}`], bb = o.featureValues[`s2b_${k}`];
+        if (a !== undefined && bb !== undefined) o.featureValues[`d_${k}`] = a === null || bb === null ? null : a - bb;
+      }
+      featureDefs.push(...deltas);
+    }
     lap('sentinel');
   }
-  return { labels: seg.labels, count: seg.count, objects, featureDefs, seedSpacingPx: seg.seedSpacingPx, coarsePixels, sentinelExact, stageMs };
+  const coniferScore = scoreConifer(objects);
+  if (coniferScore.scored) featureDefs.push(coniferScoreDef());
+  else for (const o of objects) delete o.featureValues.conifer_score;
+  return { labels: seg.labels, count: seg.count, objects, featureDefs, seedSpacingPx: seg.seedSpacingPx, coarsePixels, sentinelExact, coniferScore, stageMs };
 }
 
-function sentinelStats(job: ObjectsJob, labels: Int32Array, count: number, objects: ObjectRecord[]) {
-  const s = job.sentinel!, g = job.grid;
+function sentinelStats(job: ObjectsJob, s: SentinelInput, prefix: string, dateLabel: string, supportPrefix: string, labels: Int32Array, count: number, objects: ObjectRecord[]) {
+  const g = job.grid;
   const byRes = [...s.rasters].sort((a, b) => a.res - b.res);
   // The SCL mask, on its own 20 m grid, applied to every raster through coordinates.
   const sclR = s.rasters.find(r => r.values.scl);
@@ -91,7 +112,7 @@ function sentinelStats(job: ObjectsJob, labels: Int32Array, count: number, objec
       return c < 0 || r < 0 || c >= sclR.w || r >= sclR.h || bad[r * sclR.w + c] === 1;
     };
   }
-  const defs = sentinelFeatureDefs(s.sourceId, s.bands, s.indices);
+  const defs = sentinelFeatureDefs(s.sourceId, s.bands, s.indices, prefix, dateLabel);
   let exact = true;
   let coarse: { res: number; pixels: Int32Array[] } | null = null;
   for (const r of byRes) {
@@ -116,15 +137,15 @@ function sentinelStats(job: ObjectsJob, labels: Int32Array, count: number, objec
     const fn = fineToNative({ w: g.w, h: g.h, x0: g.x0, y0: g.y0, cellM: g.cellM, epsg: g.epsg }, masked, toNative);
     exact &&= fn.exact;
     const stats = areaWeighted(labels, count, fn.index, g.cellM * g.cellM, masked, names2);
-    const supportKey = `sentinel_${r.res}m`;
+ const supportKey = `${supportPrefix}_${r.res}m`;
     for (const o of objects) {
-      for (const name of names2) o.featureValues[`s2_${name}`] = Number.isFinite(stats[name].mean[o.index]) ? stats[name].mean[o.index] : null;
+      for (const name of names2) o.featureValues[`${prefix}_${name}`] = Number.isFinite(stats[name].mean[o.index]) ? stats[name].mean[o.index] : null;
       const sup = stats[names2[0]].support[o.index];
       // Validity is shared by every plane of one raster (one mask), so one support record per raster.
       o.support[supportKey] = { ...sup, qualityFlags: [...sup.qualityFlags, ...(fn.exact ? [] : ['approximate-intersection'])] };
-      for (const f of sup.qualityFlags) if (!o.flags.includes(f)) o.flags.push(f);
+      for (const f of sup.qualityFlags) { const tag = prefix === 's2' ? f : `${f} (second date)`; if (!o.flags.includes(tag)) o.flags.push(tag); }
     }
-    for (const d of defs) if (names2.includes(d.id.replace(/^s2_/, ''))) d.parameters = { ...d.parameters, supportKey, intersection: fn.exact ? 'exact' : 'approximate (fine-grid)' };
+    for (const d of defs) if (names2.includes(d.id.slice(prefix.length + 1))) d.parameters = { ...d.parameters, supportKey, intersection: fn.exact ? 'exact' : 'approximate (fine-grid)' };
     if (!coarse || r.res > coarse.res) coarse = { res: r.res, pixels: stats._pixels };
   }
   return { defs: defs.filter(d => objects.length === 0 || d.id in objects[0].featureValues), coarsePixels: coarse?.pixels ?? null, exact };

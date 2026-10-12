@@ -29,6 +29,11 @@ A six-step workflow — **Study area → Sources → Objects → Training → Cl
 - **Sentinel-2 is read at native resolution** (10 m and 20 m, never resampled) and summarized per object by the area of
   each native pixel the object covers, with its valid fraction, native-pixel count and an effective count. Objects
   smaller than a pixel, or mostly made of other cover, are flagged as coarse/mixed.
+- Classes form a tree: structure first (forest, shrub, low vegetation, water, built), then **composition** within it —
+  coniferous / broadleaf / mixed forest and shrub; graminoid, ericaceous, moss, lichen and seedlings in the ground layer —
+  with a separate model per level. A second Sentinel-2 date (leaf-off or autumn), red edge, crown shape from the CHM,
+  photo colour composition and an object-level conifer score supply the evidence; what separates well and what does
+  not is set out in [docs/OBIA.md](docs/OBIA.md#4a-vegetation-composition-level-2).
 - Labels by tapping objects or by importing reference polygons (≥ 80 % coverage by one class) and points; training and
   held-out validation roles; undo/redo.
 - A seeded **Random Forest** with **spatial cross-validation** (blocks, with a buffer against shared Sentinel pixels),

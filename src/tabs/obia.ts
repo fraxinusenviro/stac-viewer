@@ -20,7 +20,8 @@ import { describeFile, readNative, registerLocalFile, sampleGrid, type InputSour
 import { aoiAreaM2, aoiBox, fmtArea, pointInAoi, polygonMask, type Aoi } from '../aoi.ts';
 import { analysisGrid, gridXY, lonLatOf, projectPolygon, projector, utmEpsgFor, type AnalysisGrid, type Datum, type Projector } from '../obia/grid.ts';
 import { DEFAULT_SENTINEL, OBIA_ALGORITHM_VERSION, PRESETS, REFERENCE_SCALES, recipeHash, segmentationKey, type Recipe, type SegmentParams } from '../obia/recipe.ts';
-import { DEFAULT_CLASSES, LabelStore, assignFromPolygons, type ClassDef, type LabelEntry, type LabelRole } from '../obia/labels.ts';
+import { DEFAULT_CLASSES, LabelStore, assignFromPolygons, withComposition, type ClassDef, type LabelEntry, type LabelRole } from '../obia/labels.ts';
+import type { ClassifyResult } from '../obia/classify.ts';
 import { PROJECT_SCHEMA, classRaster, dissolvedGeoJSON, featuresCsv, fromBundle, manifest, modelBundle, objectsGeoJSON, toBundle, type ObiaProject, type ReferenceFeature } from '../obia/project.ts';
 import { STAC_PROVIDERS, capabilities, search, type NormalizedItem } from '../obia/stacAdapter.ts';
 import { probeRange } from '../obia/probe.ts';
@@ -29,7 +30,7 @@ import { runClassifyJob, runObjectsJob, type Running } from '../obia/workerClien
 import { clearProject, loadProject, requestPersistence, saveProject, storageReport } from '../obia/store.ts';
 import { writeGeoTiff } from '../obia/geotiffWrite.ts';
 import { fixtureReferences, fixtureScene, FIXTURE_LABEL } from '../obia/fixture.ts';
-import { S2_BAND_RES, type NativeRaster } from '../obia/sentinel.ts';
+import { S2_BAND_RES, sclInvalid, type NativeRaster } from '../obia/sentinel.ts';
 import type { SentinelInput } from '../obia/pipeline.ts';
 import type { FeatureGroup, SourceAsset } from '../obia/types.ts';
 import { fetchExtent, s2AssetScaling } from '../stac.ts';
@@ -42,11 +43,11 @@ import { mapClaim, type Ctx } from './ctx.ts';
 type Step = 'area' | 'sources' | 'objects' | 'training' | 'classify' | 'review';
 const STEPS: [Step, string][] = [['area', 'Study area'], ['sources', 'Sources'], ['objects', 'Objects'], ['training', 'Training'], ['classify', 'Classification'], ['review', 'Review & export']];
 const LS = 'sv.obia.settings';
-const GROUPS: [FeatureGroup, string][] = [['rgb', 'RGB colour & texture'], ['structure', 'LiDAR structure (CHM)'], ['terrain', 'Terrain'], ['geometry', 'Object geometry'], ['sentinel', 'Sentinel-2 (native support)']];
+const GROUPS: [FeatureGroup, string][] = [['rgb', 'RGB colour & texture'], ['structure', 'LiDAR structure (CHM)'], ['terrain', 'Terrain'], ['geometry', 'Object geometry'], ['sentinel', 'Sentinel-2 (native support)'], ['index', 'Conifer score (derived from Sentinel, photo and CHM)']];
 
 interface Settings {
   presetId: string; datum: Datum; cellM: number; bufferM: number; segment: SegmentParams; heightBandsM: number[];
-  s2: { from: string; to: string; maxCloud: number }; groups: FeatureGroup[]; blockM: number; folds: number; trees: number;
+  s2: { from: string; to: string; maxCloud: number }; s2b: { from: string; to: string; maxCloud: number }; groups: FeatureGroup[]; blockM: number; folds: number; trees: number;
   refThreshold: number; pointsRepresent: boolean;
 }
 
@@ -90,17 +91,23 @@ export function initObia(ctx: Ctx) {
   let S: Settings = load<Settings>(LS, {
     presetId: preset0.id, datum: 'wgs84', cellM: preset0.cellM, bufferM: 20, segment: { ...preset0.segment }, heightBandsM: [0.5, 2, 8],
     s2: { from: `${new Date().getFullYear() - 1}-06-01`, to: `${new Date().getFullYear() - 1}-09-30`, maxCloud: 20 },
-    groups: ['rgb', 'structure', 'terrain', 'geometry', 'sentinel'], blockM: 100, folds: 5, trees: 100, refThreshold: 0.8, pointsRepresent: false,
+    s2b: { from: `${new Date().getFullYear() - 1}-04-20`, to: `${new Date().getFullYear() - 1}-05-20`, maxCloud: 20 },
+    groups: ['rgb', 'structure', 'terrain', 'geometry', 'sentinel', 'index'], blockM: 100, folds: 5, trees: 100, refThreshold: 0.8, pointsRepresent: false,
   });
   const persist = () => save(LS, S);
   let step: Step = 'area';
   const area = studyAreaStep(ctx, () => render(), { prefix: 'obia-aoi', pane: 'pane-obia' });
 
   // Sources (session; their records are stored in the project when used).
-  let rgb: Chosen | null = null, chm: Chosen | null = null, s2: NormalizedItem | null = null;
+  let rgb: Chosen | null = null, chm: Chosen | null = null;
+  /** Two Sentinel-2 slots: the main (leaf-on) scene and an optional second date (leaf-off or senescence). */
+  interface Slot { item: NormalizedItem | null; probe: string; items: NormalizedItem[]; truncated: boolean; clear?: number }
+  const slots: Record<'a' | 'b', Slot> = { a: { item: null, probe: '', items: [], truncated: false }, b: { item: null, probe: '', items: [], truncated: false } };
+  // `s2` is the main scene throughout.
+  let s2: NormalizedItem | null = null;
   const trueCover = new Set<string>();
-  let lidarItems: NormalizedItem[] = [], s2Items: NormalizedItem[] = [], s2Truncated = false;
-  let s2Probe = '', nsodbAck = false, nsodbId = 'nsodb10k';
+  let lidarItems: NormalizedItem[] = [];
+  let nsodbAck = false, nsodbId = 'nsodb10k';
   let searching = '';
 
   // Project and interaction state.
@@ -114,7 +121,7 @@ export function initObia(ctx: Ctx) {
   let jobLine: HTMLElement | null = null;
   const selected = new Set<number>();
   let activeClass = DEFAULT_CLASSES[0].id, role: LabelRole = 'training';
-  let colourBy: 'none' | 'labels' | 'predicted' | 'condition' = 'labels';
+  let colourBy: 'none' | 'labels' | 'predicted' | 'structure' | 'conifer' | 'condition' = 'labels';
   let inspected: number | null = null;
   let review: { objectId: string; reason: string; shares: Record<string, number> }[] = [];
   let refFile: { name: string; fc: GeoJSON.FeatureCollection; field: string } | null = null;
@@ -142,6 +149,8 @@ export function initObia(ctx: Ctx) {
       if (!o) return null;
       if (colourBy === 'labels') { const e = labelOf.get(o.id); return e && e.role !== 'review' ? classColour.get(e.classId) ?? null : null; }
       if (colourBy === 'predicted') return classColour.get(o.reviewedClass ?? o.predictedClass ?? '') ?? null;
+      if (colourBy === 'structure') { const id = o.reviewedClass ?? o.predictedClass ?? ''; const c = project?.classes.find(x => x.id === id); return classColour.get(o.predictedParent ?? c?.parent ?? id) ?? null; }
+      if (colourBy === 'conifer') { const v = o.featureValues.conifer_score; if (v === null || v === undefined) return null; const t = Math.max(0, Math.min(1, (v + 1.5) / 3)); const c0 = [166, 217, 106], c1 = [0, 68, 27]; return `#${c0.map((a, k) => Math.round(a + (c1[k] - a) * t).toString(16).padStart(2, '0')).join('')}`; }
       if (colourBy === 'condition') return conditionColour(o.index);
       return null;
     };
@@ -179,7 +188,8 @@ export function initObia(ctx: Ctx) {
     const add = (g: GeoJSON.Geometry | null | undefined, colour: string, name: string) => { if (g) feats.push({ type: 'Feature', properties: { colour, name }, geometry: g }); };
     add(rgb?.footprint, '#d01c8b', 'RGB');
     add(chm?.footprint, '#4dac26', 'LiDAR');
-    add(s2?.geometry, '#2c7bb6', 'Sentinel-2');
+    add(slots.a.item?.geometry, '#2c7bb6', 'Sentinel-2');
+    add(slots.b.item?.geometry, '#5e3c99', 'Sentinel-2 second date');
     setGeoJSON(map, 'obia-footprints', { type: 'FeatureCollection', features: feats });
   }
 
@@ -310,32 +320,52 @@ export function initObia(ctx: Ctx) {
     say(bad && !bad.ok ? `LiDAR not readable: ${bad.reason}` : `LiDAR chosen: ${asset.label}.`, bad ? 'error' : 'info');
   }
 
-  async function searchSentinel(aoi: Aoi) {
-    searching = 'Sentinel-2'; render();
+  async function searchSentinel(aoi: Aoi, slot: 'a' | 'b') {
+    const win = slot === 'a' ? S.s2 : S.s2b, sl = slots[slot];
+    searching = `Sentinel-2 ${slot}`; render();
     try {
       const p = STAC_PROVIDERS.find(x => x.id === 'earth-search')!;
       const caps = await capabilities(p);
-      const r = await search(p, { bbox: aoiBox(aoi.geometry), datetime: `${S.s2.from}T00:00:00Z/${S.s2.to}T23:59:59Z`, limit: 50, query: { 'eo:cloud_cover': { lte: S.s2.maxCloud } }, sortby: [{ field: 'properties.eo:cloud_cover', direction: 'asc' }] }, caps, fetch, 3);
+      const r = await search(p, { bbox: aoiBox(aoi.geometry), datetime: `${win.from}T00:00:00Z/${win.to}T23:59:59Z`, limit: 50, query: { 'eo:cloud_cover': { lte: win.maxCloud } }, sortby: [{ field: 'properties.eo:cloud_cover', direction: 'asc' }] }, caps, fetch, 3);
       const cloud = (it: NormalizedItem) => it.properties['eo:cloud_cover'] as number | undefined;
       // Without the query extension the filter is applied here, on the scenes returned, and said so.
       const filteredHere = !caps.query || r.dropped.includes('query');
-      s2Items = (filteredHere ? r.items.filter(it => (cloud(it) ?? 101) <= S.s2.maxCloud) : r.items).sort((a, b) => (cloud(a) ?? 101) - (cloud(b) ?? 101));
-      s2Truncated = r.truncated;
-      if (filteredHere) say(`The catalogue could not filter by cloud: ${s2Items.length} of ${r.items.length} returned scenes pass ≤ ${S.s2.maxCloud} % here${r.truncated ? ', and more pages exist' : ''}.`);
-      else say(`${s2Items.length} scene${s2Items.length === 1 ? '' : 's'} found${r.truncated ? ' (more pages exist; narrow the dates)' : ''}.`);
+      sl.items = (filteredHere ? r.items.filter(it => (cloud(it) ?? 101) <= win.maxCloud) : r.items).sort((a, b) => (cloud(a) ?? 101) - (cloud(b) ?? 101));
+      sl.truncated = r.truncated;
+      if (filteredHere) say(`The catalogue could not filter by cloud: ${sl.items.length} of ${r.items.length} returned scenes pass ≤ ${win.maxCloud} % here${r.truncated ? ', and more pages exist' : ''}.`);
+      else say(`${sl.items.length} scene${sl.items.length === 1 ? '' : 's'} found${r.truncated ? ' (more pages exist; narrow the dates)' : ''}.`);
     } catch (e) { say(`Sentinel-2 search failed: ${(e as Error).message}`, 'error'); }
     searching = ''; render();
   }
 
-  async function chooseSentinel(it: NormalizedItem | null) {
-    s2 = it; s2Probe = '';
+  const S2_KEYS = [...DEFAULT_SENTINEL.bands, 'scl'];
+
+  async function chooseSentinel(it: NormalizedItem | null, slot: 'a' | 'b') {
+    const sl = slots[slot];
+    sl.item = it; sl.probe = ''; sl.clear = undefined;
+    if (slot === 'a') s2 = it;
     paintFootprints(); render();
     if (!it) return;
-    const missing = [...DEFAULT_SENTINEL.bands, 'scl'].filter(b => !it.assets[b]);
-    if (missing.length) { s2Probe = `This scene lacks ${missing.join(', ')}: it cannot supply the declared predictors.`; render(); return; }
+    const missing = S2_KEYS.filter(b => !it.assets[b]);
+    if (missing.length) { sl.probe = `Not usable: this scene lacks ${missing.join(', ')}.`; render(); return; }
     const pr = await probeRange(it.assets.red.href);
-    s2Probe = pr.ok ? 'Byte-range reads confirmed.' : `Not readable: ${pr.reason}`;
-    if (!it.properties['s2:processing_baseline'] && !it.assets.red.bands[0]?.offset) s2Probe += ' The scene states neither a processing baseline nor a reflectance offset: values may be mis-scaled.';
+    sl.probe = pr.ok ? 'Byte-range reads confirmed.' : `Not readable: ${pr.reason}`;
+    // The tile's cloud figure is for 110 km × 110 km; what matters is the study area. One small 20 m read says.
+    const aoi = area.current().aoi;
+    if (pr.ok && aoi) {
+      try {
+        const win = await readNative([['scl', { url: it.assets.scl.href, sample: 0, scale: 1, offset: 0, nodata: 0 }]], aoiBox(aoi.geometry));
+        const bad = sclInvalid(win.values.scl, win.w, win.h, DEFAULT_SENTINEL.sclInvalid, DEFAULT_SENTINEL.maskBufferPx);
+        const SCL_NAMES: Record<number, string> = { 0: 'no data', 1: 'saturated', 3: 'cloud shadow', 8: 'cloud', 9: 'dense cloud', 10: 'thin cirrus', 11: 'snow' };
+        const why = new Map<string, number>();
+        for (let i = 0; i < bad.length; i++) if (bad[i]) { const c = win.values.scl[i]; const k = SCL_NAMES[c] ?? 'next to cloud'; why.set(k, (why.get(k) ?? 0) + 1); }
+        const clear = 1 - bad.reduce((a, b) => a + b, 0) / bad.length;
+        sl.clear = clear;
+        sl.probe += ` Clear over ${pct(clear)} of the study area's box${clear < 0.999 ? ` (masked: ${[...why].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${pct(n / bad.length)}`).join(', ')})` : ''}.`;
+        if (clear < 0.5) sl.probe += ' Choose another scene: most objects would have no value from this date.';
+      } catch (e) { sl.probe += ` The scene classification could not be read (${(e as Error).message}).`; }
+    }
+    if (!it.properties['s2:processing_baseline'] && !it.assets.red.bands[0]?.offset) sl.probe += ' The scene states neither a processing baseline nor a reflectance offset: values may be mis-scaled.';
     render();
   }
 
@@ -389,7 +419,7 @@ export function initObia(ctx: Ctx) {
       algorithm: OBIA_ALGORITHM_VERSION, aoi: { id: aoi.id, name: aoi.name, geometry: aoi.geometry }, objective: S.presetId, epsg, cellM: S.cellM, bufferM: S.bufferM,
       segment: S.segment, referenceScales: REFERENCE_SCALES,
       sources: { rgb: rgb?.asset.id ?? null, chm: chm?.asset.id ?? null, dtm: chm?.inputs['lidar:dtm'] ? chm.asset.id : null, sentinel: s2 ? `earth-search/${s2.collectionId}/${s2.itemId}` : null },
-      sourceVersions: sv, sentinel: { itemId: s2?.itemId ?? null, ...DEFAULT_SENTINEL }, heightBandsM: S.heightBandsM,
+      sourceVersions: sv, sentinel: { itemId: s2?.itemId ?? null, secondItemId: slots.b.item?.itemId ?? null, ...DEFAULT_SENTINEL }, heightBandsM: S.heightBandsM,
     };
   }
 
@@ -433,11 +463,12 @@ export function initObia(ctx: Ctx) {
     return planes;
   }
 
-  async function readSentinel(aoi: Aoi, stage: (s: string) => void): Promise<SentinelInput | null> {
-    if (!s2) return null;
+  async function readSentinel(aoi: Aoi, scene: NormalizedItem | null, label: string, stage: (s: string) => void): Promise<SentinelInput | null> {
+    if (!scene) return null;
+    const s2 = scene;
     const box = aoiBox(aoi.geometry), pad = S.bufferM / 111000 + 0.0005;
     const b: [number, number, number, number] = [box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad];
-    const keys = [...DEFAULT_SENTINEL.bands, 'nir08', 'scl'].filter((k, i, a) => a.indexOf(k) === i && s2!.assets[k]);
+    const keys = S2_KEYS.filter(k => s2.assets[k]);
     const baseline = (s2.properties['s2:processing_baseline'] as string | undefined) ?? null;
     const groups = new Map<string, NativeRaster>();
     // Three reads at a time: each band is its own COG, and an uncapped burst stalls a weak link.
@@ -445,10 +476,10 @@ export function initObia(ctx: Ctx) {
     let next = 0, done = 0;
     await Promise.all(Array.from({ length: Math.min(3, keys.length) }, async () => {
       while (next < keys.length) {
-        const k = keys[next++], a = s2!.assets[k];
+        const k = keys[next++], a = s2.assets[k];
         const sc = k === 'scl' ? { scale: 1, offset: 0, nodata: 0 } : s2AssetScaling(k, a.bands[0] ? { scale: a.bands[0].scale, offset: a.bands[0].offset, nodata: a.bands[0].noData } : undefined, baseline);
         wins.set(k, await readNative([[k, { url: a.href, sample: 0, scale: sc.scale, offset: sc.offset, nodata: sc.nodata }]], b));
-        stage(`Reading Sentinel-2 at native resolution: ${++done} of ${keys.length} bands…`);
+        stage(`Reading ${label} at native resolution: ${++done} of ${keys.length} bands…`);
       }
     }));
     for (const k of keys) {
@@ -459,7 +490,7 @@ export function initObia(ctx: Ctx) {
       groups.set(gk, r);
     }
     for (const r of groups.values()) if (Math.abs(r.res - (S2_BAND_RES[Object.keys(r.values)[0]] ?? r.res)) > 1e-6) throw new Error(`Sentinel-2 ${Object.keys(r.values)[0]} came back at ${r.res} m, not its native resolution`);
-    return { sourceId: `earth-search/${s2.collectionId}/${s2.itemId}`, rasters: [...groups.values()], bands: [...DEFAULT_SENTINEL.bands, 'nir08'], indices: DEFAULT_SENTINEL.indices, sclInvalid: DEFAULT_SENTINEL.sclInvalid, maskBufferPx: DEFAULT_SENTINEL.maskBufferPx };
+    return { sourceId: `earth-search/${s2.collectionId}/${s2.itemId}`, rasters: [...groups.values()], bands: DEFAULT_SENTINEL.bands, indices: DEFAULT_SENTINEL.indices, sclInvalid: DEFAULT_SENTINEL.sclInvalid, maskBufferPx: DEFAULT_SENTINEL.maskBufferPx };
   }
 
   async function runObjects(kind: 'preview' | 'full') {
@@ -516,14 +547,15 @@ export function initObia(ctx: Ctx) {
         chm: planes.chm ? showImage(map, 'obia-chm', chmImage(planes.chm, grid.width, grid.height), grid, plan.p, 0.9, layerOn['obia-chm']) : undefined,
         quality: showImage(map, 'obia-quality', qualityImage(rgbOk, chmOk, mask, grid.width, grid.height), grid, plan.p, 0.7, layerOn['obia-quality']),
       };
-      const sentinel = kind === 'full' ? await readSentinel(aoi, stage) : null;
+      const sentinel = kind === 'full' ? await readSentinel(aoi, slots.a.item, 'Sentinel-2', stage) : null;
+      const sentinelB = kind === 'full' && sentinel ? await readSentinel(aoi, slots.b.item, 'the second date', stage) : null;
       if (cancelled) throw new Error('cancelled');
       const tS2 = performance.now() - t0 - tRead;
       stage('Segmenting in the worker…');
       const run = runObjectsJob({
         grid: { w: grid.width, h: grid.height, x0: grid.transform[0], y0: grid.transform[3], cellM: S.cellM, epsg: plan.epsg },
         planes, mask, params: S.segment, windowEdge: kind === 'preview', heightBandsM: S.heightBandsM, segmentationVersion: segVersion,
-        sources: { rgb: rgb?.asset.id ?? null, chm: chm?.asset.id ?? null, dtm: recipe.sources.dtm }, sentinel,
+        sources: { rgb: rgb?.asset.id ?? null, chm: chm?.asset.id ?? null, dtm: recipe.sources.dtm }, sentinel, sentinelB,
       }, s => stage(`Worker: ${s}…`));
       job.run = run as Running<unknown>;
       const r = await run.promise;
@@ -536,24 +568,26 @@ export function initObia(ctx: Ctx) {
         const sources: SourceAsset[] = [];
         if (rgb) sources.push(rgb.asset);
         if (chm) sources.push(chm.asset);
-        if (s2 && sentinel) {
-          const r10 = sentinel.rasters.find(x => x.res === 10) ?? sentinel.rasters[0];
-          sources.push({
-            id: sentinel.sourceId, role: 'spectral-context', label: `Sentinel-2 ${s2.itemId}`, collectionId: s2.collectionId, itemId: s2.itemId,
-            assetKey: [...DEFAULT_SENTINEL.bands, 'nir08', 'scl'].join(','), uriReference: s2.assets.red.href, acquiredStart: s2.datetime ?? undefined, acquiredEnd: s2.datetime ?? undefined,
-            nativeResolutionM: [10, 10], access: 'analytical', accessNote: s2Probe,
+        const sceneAsset = (it: NormalizedItem, inp: SentinelInput, probe: string, which: string): SourceAsset => {
+          const r10 = inp.rasters.find(x => x.res === 10) ?? inp.rasters[0];
+          return {
+            id: inp.sourceId, role: 'spectral-context', label: `Sentinel-2 ${it.itemId} (${which})`, collectionId: it.collectionId, itemId: it.itemId,
+            assetKey: S2_KEYS.join(','), uriReference: it.assets.red.href, acquiredStart: it.datetime ?? undefined, acquiredEnd: it.datetime ?? undefined,
+            nativeResolutionM: [10, 10], access: 'analytical', accessNote: probe,
             grid: { crs: `EPSG:${r10.epsg}`, transform: [r10.originX, r10.res, 0, r10.originY, 0, -r10.res], width: r10.w, height: r10.h, pixelConvention: 'area' },
-            bands: [...DEFAULT_SENTINEL.bands, 'nir08'].map(k => ({ name: k, unit: 'reflectance', scale: s2!.assets[k].bands[0]?.scale, offset: s2!.assets[k].bands[0]?.offset, noData: s2!.assets[k].bands[0]?.noData })),
-            contentVersion: String(s2.properties.updated ?? ''), attribution: 'Copernicus Sentinel-2 data, via Element 84 Earth Search',
-          });
-        }
+            bands: DEFAULT_SENTINEL.bands.map(k => ({ name: k, unit: 'reflectance', scale: it.assets[k]?.bands[0]?.scale, offset: it.assets[k]?.bands[0]?.offset, noData: it.assets[k]?.bands[0]?.noData })),
+            contentVersion: String(it.properties.updated ?? ''), attribution: 'Copernicus Sentinel-2 data, via Element 84 Earth Search',
+          };
+        };
+        if (slots.a.item && sentinel) sources.push(sceneAsset(slots.a.item, sentinel, slots.a.probe, 'main date'));
+        if (slots.b.item && sentinelB) sources.push(sceneAsset(slots.b.item, sentinelB, slots.b.probe, 'second date'));
         const prev = project;
         const keepClasses = prev?.classes ?? DEFAULT_CLASSES.map(c => ({ ...c }));
         const at = new Date().toISOString();
         const next: ObiaProject = {
           schema: PROJECT_SCHEMA, created: prev?.created ?? at, updated: at, recipe, recipeHash: recipeHash(recipe), segmentationVersion: segVersion,
           sources, grid, crsDefinition: plan.p.def, labels: r.labels, count: r.count, objects: r.objects, featureDefs: r.featureDefs, coarsePixels: r.coarsePixels,
-          classes: keepClasses, labelEntries: [], references: prev?.references ?? [], model: null, classification: null,
+          classes: keepClasses, labelEntries: [], references: prev?.references ?? [], model: null, classification: null, coniferScore: r.coniferScore,
           measured: {
             areaHa: aoiAreaM2(aoi.geometry) / 1e4, gridPx: grid.width * grid.height, objects: r.count, estimatedMiB: Math.round(est.bytes / 1024 ** 2), budgetMiB: Math.round(est.budget / 1024 ** 2),
             readFineMs: Math.round(tRead), readSentinelMs: Math.round(tS2), ...Object.fromEntries(Object.entries(r.stageMs).map(([k, v]) => [`${k}Ms`, Math.round(v)])),
@@ -576,8 +610,14 @@ export function initObia(ctx: Ctx) {
         project.labelEntries = labels.all();
         display = disp;
         reapplyReferences(false);
+        // How much of each date reached the objects, stated rather than left in the support tables.
+        const validShare = (key: string) => { const xs = r.objects.filter(o => o.support[key]); return xs.length ? xs.filter(o => o.support[key].validFraction > 0).length / xs.length : null; };
+        const vA = validShare('sentinel_10m'), vB = validShare('sentinel_b_10m');
+        project.measured = { ...project.measured, ...(vA !== null ? { s2ValidObjects: vA } : {}), ...(vB !== null ? { s2bValidObjects: vB } : {}) };
         await checkpoint();
-        say(`${r.count.toLocaleString()} objects over ${fmtArea(aoiAreaM2(aoi.geometry))} at ${S.cellM} m in ${(project.measured.totalMs as number / 1000).toFixed(1)} s.${carried.some(c => c.pending) ? ` ${carried.filter(c => c.pending).length} earlier labels carried over by location, held for confirmation in Training.` : ''}`);
+        const thin = [vA !== null && vA < 0.5 ? `the main date has valid pixels for only ${pct(vA)} of objects` : '', vB !== null && vB < 0.5 ? `the second date has valid pixels for only ${pct(vB)} of objects` : ''].filter(Boolean);
+        if (thin.length) say(`Objects done, but ${thin.join(' and ')} (cloud, cirrus or shadow in the scene classification). Those features are missing, not zero; choose a clearer scene in Sources.`, 'error');
+        else say(`${r.count.toLocaleString()} objects over ${fmtArea(aoiAreaM2(aoi.geometry))} at ${S.cellM} m in ${(project.measured.totalMs as number / 1000).toFixed(1)} s.${carried.some(c => c.pending) ? ` ${carried.filter(c => c.pending).length} earlier labels carried over by location, held for confirmation in Training.` : ''}`);
       }
       paintObjects();
     } catch (e) {
@@ -622,7 +662,7 @@ export function initObia(ctx: Ctx) {
     if (!project || job) return;
     const t0 = performance.now();
     const run = runClassifyJob({
-      objects: project.objects, featureDefs: project.featureDefs, labels: labels.all(), groups: S.groups, blockM: S.blockM, folds: S.folds,
+      objects: project.objects, featureDefs: project.featureDefs, labels: labels.all(), classes: project.classes, groups: S.groups, blockM: S.blockM, folds: S.folds,
       forest: { trees: S.trees, maxDepth: 16, minLeaf: 1, seed: 20261012 }, coarsePixels: project.coarsePixels,
     }, s => { if (jobLine) jobLine.textContent = `Worker: ${s}…`; });
     job = { label: 'Training', stage: 'Training and cross-validating…', run: run as Running<unknown>, t0 };
@@ -630,13 +670,13 @@ export function initObia(ctx: Ctx) {
     try {
       const r = await run.promise;
       const byId = new Map(r.predictions.map(p => [p.objectId, p]));
-      for (const o of project.objects) { const p = byId.get(o.id); o.predictedClass = p?.cls; o.classScores = p?.scores; }
+      for (const o of project.objects) { const p = byId.get(o.id); o.predictedClass = p?.cls; o.classScores = p?.scores; o.predictedParent = p?.parent; o.parentScores = p?.parentScores; }
       project.model = r.model;
-      project.classification = { settings: { groups: S.groups, blockM: S.blockM, folds: S.folds, forest: r.model.options }, features: r.features, cv: r.cv, ablation: r.ablation, validation: r.validation, trainedOn: r.trainedOn, labelsHash: labelsHash(), segmentationVersion: project.segmentationVersion, at: new Date().toISOString() };
+      project.classification = { settings: { groups: S.groups, blockM: S.blockM, folds: S.folds, forest: r.model.options }, features: r.features, cv: r.cv, ablation: r.ablation, validation: r.validation, trainedOn: r.trainedOn, sublevels: r.sublevels, skipped: r.skipped, labelsHash: labelsHash(), segmentationVersion: project.segmentationVersion, at: new Date().toISOString() };
       project.measured = { ...project.measured, classifyMs: Math.round(performance.now() - t0), trainedOn: r.trainedOn };
       colourBy = 'predicted';
       await checkpoint();
-      say(`Model trained on ${r.trainedOn} labelled objects with ${r.features.length} predictors; every object predicted (${((performance.now() - t0) / 1000).toFixed(1)} s).`);
+      say(`Structure model trained on ${r.trainedOn} labelled objects${r.sublevels.length ? `; composition models for ${r.sublevels.map(l => className(l.parent!)).join(', ')}` : ''}; ${r.features.length} predictors; every object predicted (${((performance.now() - t0) / 1000).toFixed(1)} s).`);
       paintObjects();
     } catch (e) {
       const m = (e as Error).message;
@@ -770,20 +810,26 @@ export function initObia(ctx: Ctx) {
           h('span', { class: 'card-body' }, h('strong', {}, it.itemId), h('span', { class: 'muted' }, `${it.collectionId} · ${it.datetime ? fmtDate(it.datetime) : 'undated'} · ${it.assets.dsm ? 'DTM + DSM' : 'DTM only (no CHM)'} · ${trueCover.has(it.itemId) ? 'true coverage' : 'envelope'} ${pct(cov)}`)));
       }),
     ]));
-    // Sentinel
-    const dd = s2 && chm?.asset.acquiredStart ? days(s2.datetime, chm.asset.acquiredStart) : null;
-    body.append(sourceCard('3 · Spectral context (Sentinel-2, optional)', s2 ? { asset: { id: s2.itemId, role: 'spectral-context', label: s2.itemId, uriReference: '', nativeResolutionM: [10, 10], acquiredStart: s2.datetime ?? undefined, access: s2Probe.startsWith('Not') ? 'unavailable' : 'analytical', accessNote: s2Probe }, inputs: {}, footprint: s2.geometry } : null, [
-      h('div', { class: 'row' },
-        h('label', { class: 'row small' }, 'From ', h('input', { type: 'date', value: S.s2.from, onchange: (e: Event) => { S.s2.from = (e.target as HTMLInputElement).value; persist(); } })),
-        h('label', { class: 'row small' }, 'To ', h('input', { type: 'date', value: S.s2.to, onchange: (e: Event) => { S.s2.to = (e.target as HTMLInputElement).value; persist(); } })),
-        h('label', { class: 'row small' }, 'Cloud ≤ ', h('input', { type: 'number', min: '0', max: '100', value: String(S.s2.maxCloud), style: 'width:56px', onchange: (e: Event) => { S.s2.maxCloud = +(e.target as HTMLInputElement).value; persist(); } }), ' %')),
-      h('div', { class: 'row' }, h('button', { class: 'chip', disabled: !!searching, onclick: () => void searchSentinel(aoi) }, searching === 'Sentinel-2' ? 'Searching…' : 'Search Earth Search'), s2 ? h('button', { class: 'chip', onclick: () => void chooseSentinel(null) }, 'No Sentinel') : null),
-      dd !== null ? h('p', { class: dd > 365 ? 'note small' : 'muted small' }, `Sentinel and LiDAR are ${(dd / 365.25).toFixed(1)} years apart${dd > 365 ? ': anything built, cleared or grown between them reads wrongly' : ''}.`) : null,
-      ...s2Items.slice(0, 10).map(it => h('button', { class: `card${s2?.itemId === it.itemId ? ' on' : ''}`, onclick: () => void chooseSentinel(it) },
-        h('span', { class: 'card-body' }, h('strong', {}, `${it.datetime ? fmtDate(it.datetime) : '?'} · ${fmt(it.properties['eo:cloud_cover'] as number, 1)} % cloud`), h('span', { class: 'muted' }, `${it.itemId} · covers ${pct(coverageOf(aoi.geometry, it.geometry))} · baseline ${it.properties['s2:processing_baseline'] ?? 'not stated'}`)))),
-      s2Truncated ? h('p', { class: 'muted small' }, 'More scenes exist than were listed: narrow the dates.') : null,
-      h('p', { class: 'muted small' }, 'Read at native support (B02–B04, B08 at 10 m; B8A, B11, SCL at 20 m) and never resampled onto the fine grid. Cloud, shadow, cirrus and snow are masked from the SCL with a one-pixel buffer. RGB + LiDAR alone is a complete workflow.'),
-    ]));
+    // Sentinel: the main (leaf-on) scene and an optional second date.
+    const sceneCard = (slot: 'a' | 'b', title: string, win: Settings['s2'], note: string) => {
+      const sl = slots[slot], it = sl.item;
+      const dd = it && chm?.asset.acquiredStart ? days(it.datetime, chm.asset.acquiredStart) : null;
+      return sourceCard(title, it ? { asset: { id: it.itemId, role: 'spectral-context', label: it.itemId, uriReference: '', nativeResolutionM: [10, 10], acquiredStart: it.datetime ?? undefined, access: /^Not/.test(sl.probe) ? 'unavailable' : 'analytical', accessNote: sl.probe }, inputs: {}, footprint: it.geometry } : null, [
+        h('div', { class: 'row' },
+          h('label', { class: 'row small' }, 'From ', h('input', { type: 'date', value: win.from, onchange: (e: Event) => { win.from = (e.target as HTMLInputElement).value; persist(); } })),
+          h('label', { class: 'row small' }, 'To ', h('input', { type: 'date', value: win.to, onchange: (e: Event) => { win.to = (e.target as HTMLInputElement).value; persist(); } })),
+          h('label', { class: 'row small' }, 'Cloud ≤ ', h('input', { type: 'number', min: '0', max: '100', value: String(win.maxCloud), style: 'width:56px', onchange: (e: Event) => { win.maxCloud = +(e.target as HTMLInputElement).value; persist(); } }), ' %')),
+        slot === 'b' ? h('div', { class: 'row' }, ...([['Spring leaf-off', '04-20', '05-20'], ['Autumn senescence', '10-01', '11-15']] as const).map(([t, f, to]) => h('button', { class: 'chip', onclick: () => { const y = (win.from || S.s2.from).slice(0, 4); win.from = `${y}-${f}`; win.to = `${y}-${to}`; persist(); render(); } }, t))) : null,
+        h('div', { class: 'row' }, h('button', { class: 'chip', disabled: !!searching || (slot === 'b' && !slots.a.item), onclick: () => void searchSentinel(aoi, slot) }, searching === `Sentinel-2 ${slot}` ? 'Searching…' : 'Search Earth Search'), it ? h('button', { class: 'chip', onclick: () => void chooseSentinel(null, slot) }, 'None') : null),
+        dd !== null ? h('p', { class: dd > 365 ? 'note small' : 'muted small' }, `${(dd / 365.25).toFixed(1)} years from the LiDAR${dd > 365 ? ': anything built, cleared or grown between them reads wrongly' : ''}.`) : null,
+        ...sl.items.slice(0, 8).map(x => h('button', { class: `card${it?.itemId === x.itemId ? ' on' : ''}`, onclick: () => void chooseSentinel(x, slot) },
+          h('span', { class: 'card-body' }, h('strong', {}, `${x.datetime ? fmtDate(x.datetime) : '?'} · ${fmt(x.properties['eo:cloud_cover'] as number, 1)} % cloud`), h('span', { class: 'muted' }, `${x.itemId} · covers ${pct(coverageOf(aoi.geometry, x.geometry))} · baseline ${x.properties['s2:processing_baseline'] ?? 'not stated'}`)))),
+        sl.truncated ? h('p', { class: 'muted small' }, 'More scenes exist than were listed: narrow the dates.') : null,
+        h('p', { class: 'muted small' }, note),
+      ]);
+    };
+    body.append(sceneCard('a', '3 · Spectral context: main date (Sentinel-2, optional)', S.s2, 'Leaf-on (June–September). Read at native support — B02–B04, B08 at 10 m; B05–B07, B8A, B11, SCL at 20 m — never resampled onto the fine grid. Cloud, shadow, cirrus and snow masked from the SCL with a one-pixel buffer. RGB + LiDAR alone is a complete workflow.'));
+    body.append(sceneCard('b', '4 · Second date (optional): leaf-off or senescence', S.s2b, 'The single strongest evidence for vegetation TYPE: broadleaf trees and shrubs lose their greenness leaf-off (late April–mid May, before leaf-out, after snow-melt) while conifers keep it; in autumn graminoids turn straw-coloured and ericaceous shrubs red. Adds second-date bands and Δ (main − second) differences per object.'));
     body.append(h('div', { class: 'row' }, h('button', { class: 'btn', disabled: !rgb && !chm, onclick: () => setStep('objects') }, 'Next: Objects')));
   }
 
@@ -821,6 +867,9 @@ export function initObia(ctx: Ctx) {
     if (project && !preview) {
       const m = project.measured;
       body.append(h('p', { class: 'small' }, `${project.count.toLocaleString()} objects · segmentation ${project.segmentationVersion} · ${project.grid.width} × ${project.grid.height} cells · read ${fmt((m.readFineMs as number) / 1000, 1)} s + Sentinel ${fmt((m.readSentinelMs as number) / 1000, 1)} s · segment ${fmt((m.segmentationMs as number) / 1000, 1)} s · features ${fmt((m.featuresMs as number) / 1000, 1)} s · Sentinel stats ${fmt(((m.sentinelMs as number) ?? 0) / 1000, 1)} s (${m.sentinelIntersection}).`));
+      const vs = (k: string, label: string) => (typeof m[k] === 'number' ? `${label} valid for ${pct(m[k] as number)} of objects` : '');
+      const val = [vs('s2ValidObjects', 'Sentinel main date'), vs('s2bValidObjects', 'second date')].filter(Boolean);
+      if (val.length) body.append(h('p', { class: val.some(t => /valid for ([0-4]?\d) %/.test(t)) ? 'note small' : 'muted small' }, `${val.join('; ')}.`));
       const small = project.objects.filter(o => o.flags.includes('below-min-patch')).length;
       if (small) body.append(h('p', { class: 'muted small' }, `${small} objects are below the minimum patch area and kept because they differ from every neighbour (flagged).`));
     }
@@ -834,13 +883,24 @@ export function initObia(ctx: Ctx) {
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: s2on, disabled: !project?.sources.some(s => s.role === 'spectral-context'), onchange: (e: Event) => paintS2Grid((e.target as HTMLInputElement).checked) }), 'Sentinel-2 native 10 m grid'));
   }
 
+  const className = (id: string) => project?.classes.find(c => c.id === id)?.label ?? id;
+
+  /** The class tree as an indented list; a parent's counts include its sub-classes' labels. */
   function classPicker(): HTMLElement {
     const classes = project?.classes ?? [];
-    return h('div', { class: 'class-list' }, ...classes.map(c => {
-      const nT = labels.all().filter(e => e.classId === c.id && e.role === 'training' && !e.pending).length, nV = labels.all().filter(e => e.classId === c.id && e.role === 'validation' && !e.pending).length;
-      return h('button', { class: `class-btn${c.id === activeClass ? ' on' : ''}`, title: c.description ?? '', onclick: () => { activeClass = c.id; render(); } },
-        h('span', { class: 'swatch', style: `--c:${c.colour}` }), h('span', { class: 'grow' }, c.label), h('span', { class: 'muted share' }, `${nT}${nV ? ` + ${nV}v` : ''}`));
-    }));
+    const kids = (id: string) => classes.filter(c => c.parent === id);
+    const under = (id: string): string[] => [id, ...kids(id).flatMap(k => under(k.id))];
+    const count = (id: string, r: LabelRole) => { const ids = new Set(under(id)); return labels.all().filter(e => ids.has(e.classId) && e.role === r && !e.pending).length; };
+    const btn = (c: ClassDef, depth: number): HTMLElement[] => {
+      const nT = count(c.id, 'training'), nV = count(c.id, 'validation');
+      return [h('button', { class: `class-btn${c.id === activeClass ? ' on' : ''}`, style: depth ? `margin-left:${depth * 18}px` : '', title: c.description ?? '', onclick: () => { activeClass = c.id; render(); } },
+        h('span', { class: 'swatch', style: `--c:${c.colour}` }), h('span', { class: 'grow' }, c.label), h('span', { class: 'muted share' }, `${nT}${nV ? ` + ${nV}v` : ''}`)),
+        ...kids(c.id).flatMap(k => btn(k, depth + 1))];
+    };
+    const roots = classes.filter(c => !c.parent || !classes.some(x => x.id === c.parent));
+    const active = classes.find(c => c.id === activeClass);
+    return h('div', {}, h('div', { class: 'class-list' }, ...roots.flatMap(c => btn(c, 0))),
+      active?.description ? h('p', { class: 'muted small' }, `${active.label}: ${active.description}`) : null);
   }
 
   function renderTraining(body: HTMLElement, n: number) {
@@ -849,7 +909,11 @@ export function initObia(ctx: Ctx) {
     if (colourBy !== 'labels') { colourBy = 'labels'; paintObjects(); }
     body.append(segBar('Label role', [{ value: 'training', label: 'Training' }, { value: 'validation', label: 'Held-out validation' }], role, v => { role = v as LabelRole; render(); }));
     body.append(h('p', { class: 'muted small' }, role === 'validation' ? 'Validation labels are never trained on and never offered as "uncertain objects"; they are reported against the final model only.' : 'Tap an object on the map to label it with the chosen class; Shift-tap to select several, then apply.'));
+    const addable = withComposition(project.classes).length - project.classes.length;
+    if (addable) body.append(h('p', { class: 'small' }, `Composition sub-classes (coniferous / broadleaf / mixed; graminoid, ericaceous, moss, lichen…) are not in this schema. `,
+      h('button', { class: 'chip', onclick: () => { project!.classes = withComposition(project!.classes); labelsChanged(); } }, `Add ${addable} sub-classes`)));
     body.append(classPicker());
+    body.append(h('p', { class: 'muted small' }, 'Label at either level: a sub-class label (e.g. Coniferous forest) also teaches the structural class above it. Composition models are fitted for a structural class once at least two of its sub-classes have labels.'));
     body.append(h('div', { class: 'row' },
       h('button', { class: 'chip', disabled: !selected.size, onclick: () => { applyLabel([...selected]); selected.clear(); paintObjects(); } }, `Label ${selected.size} selected`),
       h('button', { class: 'chip', disabled: !selected.size, onclick: () => { applyLabel([...selected], true); selected.clear(); paintObjects(); } }, 'Clear their labels'),
@@ -959,16 +1023,29 @@ export function initObia(ctx: Ctx) {
     body.append(h('button', { class: 'btn', disabled: !!job || labels.byRole('training').filter(e => !e.pending).length < 2, onclick: () => void classify() }, project.classification ? 'Train and evaluate again' : 'Train and evaluate'));
     const c = project.classification;
     if (!c) return;
-    if (c.cv?.reason) body.append(h('p', { class: 'note small' }, `No cross-validation: ${c.cv.reason}.`));
-    if (c.cv) body.append(reportTable(c.cv.report, `Spatial cross-validation (${c.features.length} predictors)`));
-    if (c.cv?.buffered?.some(x => x > 0)) body.append(h('p', { class: 'muted small' }, `Coarse-support buffer: training objects sharing a Sentinel pixel with the test fold were left out of that fold's training (${c.cv.buffered.join(', ')} per fold).`));
-    if (c.ablation) {
-      const a = c.ablation, d = (x: number | null, y: number | null) => (x === null || y === null ? '—' : `${y - x >= 0 ? '+' : ''}${(y - x).toFixed(3)}`);
-      body.append(h('p', { class: 'small' }, h('strong', {}, 'Ablation, identical folds: '), `RGB + LiDAR macro-F1 ${fmt(a.base.macroF1)} → with Sentinel ${fmt(a.withSentinel.macroF1)} (${d(a.base.macroF1, a.withSentinel.macroF1)}); area accuracy ${pct(a.base.areaAccuracy)} → ${pct(a.withSentinel.areaAccuracy)}. Sentinel is kept only if it earns its place; check the predictions against the Sentinel grid for grid-shaped artefacts.`));
-    }
-    if (c.validation) body.append(reportTable(c.validation, 'Held-out validation labels'));
-    const imp = project.model ? project.model.features.map((f, i) => [f, project!.model!.importance[i]] as const).sort((a, b) => b[1] - a[1]).slice(0, 8) : [];
-    if (imp.length) body.append(h('p', { class: 'muted small' }, `Most used predictors (mean decrease in impurity): ${imp.map(([f, v]) => `${f} ${(v * 100).toFixed(0)} %`).join(', ')}.`));
+    const levelEl = (lv: { parent: string | null; features: string[]; model: import('../obia/rf.ts').Forest; cv: ClassifyResult['cv']; ablation: ClassifyResult['ablation']; validation: ClassifyResult['validation']; trainedOn: number }) => {
+      const wrap = h('div', { class: 'res-card' }, h('strong', {}, lv.parent ? `Level 2 — composition within ${className(lv.parent)}` : 'Level 1 — structural classes'),
+        lv.parent ? h('p', { class: 'muted small' }, `Fitted on ${lv.trainedOn} objects labelled with a sub-class of ${className(lv.parent)}, applied to objects level 1 puts there. Figures are CONDITIONAL on the structural class being right.`) : null);
+      if (lv.cv?.reason) wrap.append(h('p', { class: 'note small' }, `No cross-validation: ${lv.cv.reason}.`));
+      if (lv.cv) wrap.append(reportTable(lv.cv.report, `Spatial cross-validation (${lv.features.length} predictors)`));
+      if (lv.cv?.buffered?.some(x => x > 0)) wrap.append(h('p', { class: 'muted small' }, `Coarse-support buffer: ${lv.cv.buffered.join(', ')} training objects per fold left out for sharing a Sentinel pixel with the test fold.`));
+      if (lv.ablation) {
+        const a = lv.ablation, d = (x: number | null, y: number | null) => (x === null || y === null ? '—' : `${y - x >= 0 ? '+' : ''}${(y - x).toFixed(3)}`);
+        wrap.append(h('p', { class: 'small' }, h('strong', {}, 'Ablation, identical folds: '), `without Sentinel (and the conifer score) macro-F1 ${fmt(a.base.macroF1)} → with ${fmt(a.withSentinel.macroF1)} (${d(a.base.macroF1, a.withSentinel.macroF1)}); area accuracy ${pct(a.base.areaAccuracy)} → ${pct(a.withSentinel.areaAccuracy)}.`));
+      }
+      if (lv.validation) wrap.append(reportTable(lv.validation, 'Held-out validation labels'));
+      const imp = lv.model.features.map((f, i) => [f, lv.model.importance[i]] as const).sort((a, b) => b[1] - a[1]).slice(0, 8);
+      if (imp.length) wrap.append(h('p', { class: 'muted small' }, `Most used predictors: ${imp.map(([f, v]) => `${f} ${(v * 100).toFixed(0)} %`).join(', ')}.`));
+      return wrap;
+    };
+    if (project.model) body.append(levelEl({ parent: null, features: c.features, model: project.model, cv: c.cv, ablation: c.ablation, validation: c.validation, trainedOn: c.trainedOn }));
+    for (const lv of c.sublevels ?? []) body.append(levelEl(lv));
+    for (const sk of c.skipped ?? []) body.append(h('p', { class: 'muted small' }, `No composition model for ${className(sk.parent)}: ${sk.reason}.`));
+    const cs = project.coniferScore;
+    if (cs) body.append(h('div', { class: 'res-card' }, h('strong', {}, 'Conifer score (within this run)'),
+      cs.reason ? h('p', { class: 'note small' }, `Not computed: ${cs.reason}.`) : h('p', { class: 'small' }, `${cs.scored} of ${cs.woodyObjects} woody objects scored from ${cs.terms.map(t => `${t.sign > 0 ? '+' : '−'}${t.label}`).join(', ')}. Otsu split ${fmt(cs.threshold, 2)} z; ${pct(cs.coniferShare)} on the coniferous side; bimodality ${fmt(cs.bimodality, 2)}: `,
+        h('strong', {}, (cs.bimodality ?? 0) > 0.555 ? 'two groups are plausible.' : 'no clear second group — read the score as a gradient, or the area as one type.')),
+      h('p', { class: 'muted small' }, 'A predictor and a map view (Review ▸ colour by conifer score), never a label: labels made from it would be validated against itself. It describes contrast within this run, so re-runs over different ground re-centre it.')));
     // Uncertain objects (never validation-labelled ones).
     const labelled = new Set(labels.all().map(e => e.objectId));
     const unc = project.objects.filter(o => o.classScores && !labelled.has(o.id)).map(o => { const v = Object.values(o.classScores!).sort((a, b) => b - a); return { o, m: v[0] - (v[1] ?? 0) }; }).sort((a, b) => a.m - b.m).slice(0, 8);
@@ -996,8 +1073,10 @@ export function initObia(ctx: Ctx) {
       return;
     }
     body.append(h('label', { class: 'row' }, 'Colour objects by ', h('select', { onchange: (e: Event) => { colourBy = (e.target as HTMLSelectElement).value as typeof colourBy; paintObjects(); render(); } },
-      ...([['predicted', 'Predicted class (reviewed wins)'], ['condition', 'Condition'], ['labels', 'Labels'], ['none', 'Outlines only']] as const).map(([v, t]) => h('option', { value: v, selected: colourBy === v }, t)))));
-    if (colourBy === 'condition') body.append(h('ul', { class: 'legend' }, ...CONDITIONS.map(([id, c, t]) => h('li', {}, h('span', { class: 'swatch', style: `--c:${c}` }), h('span', { class: 'grow' }, t), h('span', { class: 'muted share' }, String(project!.objects.filter(o => conditionsOf(o.index).includes(id)).length))))));
+      ...([['predicted', 'Predicted class, deepest level (reviewed wins)'], ['structure', 'Structural class only'], ['conifer', 'Conifer score (light: broadleaf → dark: conifer)'], ['condition', 'Condition'], ['labels', 'Labels'], ['none', 'Outlines only']] as const).map(([v, t]) => h('option', { value: v, selected: colourBy === v }, t)))));
+    if (colourBy === 'conifer') body.append(h('div', { class: 'ramp' }, h('div', { class: 'ramp-bar', style: 'background: linear-gradient(to right, #a6d96a, #00441b)' })),
+      h('p', { class: 'muted small' }, `Broadleaf-like ← −1.5 z … +1.5 z → conifer-like. Split ${fmt(project.coniferScore?.threshold, 2)} z. Objects that are not woody (canopy P90 < 2 m) have no score and no fill.`));
+        if (colourBy === 'condition') body.append(h('ul', { class: 'legend' }, ...CONDITIONS.map(([id, c, t]) => h('li', {}, h('span', { class: 'swatch', style: `--c:${c}` }), h('span', { class: 'grow' }, t), h('span', { class: 'muted share' }, String(project!.objects.filter(o => conditionsOf(o.index).includes(id)).length))))));
     const s2a = project.sources.find(s => s.role === 'spectral-context'), lid = project.sources.find(s => s.role === 'lidar-feature');
     const gap = days(s2a?.acquiredStart, lid?.acquiredStart);
     if (gap !== null && gap > 365) body.append(h('p', { class: 'note small' }, `Date mismatch (applies to every object): Sentinel-2 ${fmtDate(s2a!.acquiredStart!)} vs LiDAR ${fmtDate(lid!.acquiredStart!)} — ${(gap / 365.25).toFixed(1)} years. Recent spectra do not update older geometry.`));
@@ -1042,8 +1121,11 @@ export function initObia(ctx: Ctx) {
     const conds = conditionsOf(o.index);
     const wrap = h('div', { class: 'res-card' },
       h('div', { class: 'row res-head' }, h('strong', { class: 'grow' }, `Object ${o.index}`), h('span', { class: 'muted small' }, fmtArea(o.areaM2))),
-      h('p', { class: 'small' }, `Predicted: ${o.predictedClass ? p.classes.find(c => c.id === o.predictedClass)?.label ?? o.predictedClass : '—'}${o.reviewedClass ? ` · reviewed: ${p.classes.find(c => c.id === o.reviewedClass)?.label ?? o.reviewedClass}` : ''} · training status: ${lab ? `${lab.role} label "${lab.classId}" (${lab.source}${lab.pending ? ', pending' : ''})` : 'unlabelled'}`));
-    if (o.classScores) wrap.append(h('p', { class: 'muted small' }, `Model scores (vote shares, uncalibrated): ${Object.entries(o.classScores).sort((a, b) => b[1] - a[1]).map(([c, v]) => `${c} ${v.toFixed(2)}`).join(' · ')}`));
+      h('p', { class: 'small' }, `Predicted: ${o.predictedParent && o.predictedParent !== o.predictedClass ? `${className(o.predictedParent)} › ` : ''}${o.predictedClass ? className(o.predictedClass) : '—'}${o.predictedParent && o.predictedParent === o.predictedClass && p.classes.some(c => c.parent === o.predictedParent) ? ' (no composition model yet)' : ''}${o.reviewedClass ? ` · reviewed: ${p.classes.find(c => c.id === o.reviewedClass)?.label ?? o.reviewedClass}` : ''} · training status: ${lab ? `${lab.role} label "${lab.classId}" (${lab.source}${lab.pending ? ', pending' : ''})` : 'unlabelled'}`));
+    const sc = (x: Record<string, number>) => Object.entries(x).sort((a, b) => b[1] - a[1]).map(([c, v]) => `${className(c)} ${v.toFixed(2)}`).join(' · ');
+    if (o.parentScores && o.classScores && o.predictedParent !== o.predictedClass) wrap.append(h('p', { class: 'muted small' }, `Structure scores: ${sc(o.parentScores)}. Composition scores: ${sc(o.classScores)}. (Vote shares, uncalibrated.)`));
+    else if (o.classScores) wrap.append(h('p', { class: 'muted small' }, `Model scores (vote shares, uncalibrated): ${sc(o.classScores)}`));
+    if (o.featureValues.conifer_score !== undefined && o.featureValues.conifer_score !== null) wrap.append(h('p', { class: 'muted small' }, `Conifer score ${o.featureValues.conifer_score.toFixed(2)} z (split ${fmt(project?.coniferScore?.threshold, 2)}).`));
     wrap.append(h('p', { class: 'small' }, 'Conditions: ', conds.length ? conds.map(c => CONDITIONS.find(x => x[0] === c)![2]).join('; ') : 'none flagged'));
     wrap.append(h('table', { class: 'cmp' }, h('thead', {}, h('tr', {}, h('th', {}, 'Support'), h('th', {}, 'Valid'), h('th', {}, 'Native px'), h('th', {}, 'n_eff'), h('th', {}, 'Flags'))),
       h('tbody', {}, ...Object.entries(o.support).map(([k, s]) => h('tr', {}, h('td', {}, k), h('td', {}, pct(s.validFraction)), h('td', {}, s.nativePixelCount === undefined ? '' : String(s.nativePixelCount)), h('td', {}, s.effectivePixelCount === undefined ? '' : s.effectivePixelCount.toFixed(1)), h('td', {}, s.qualityFlags.join(', ')))))));
@@ -1072,7 +1154,7 @@ export function initObia(ctx: Ctx) {
     const dispRgb = showImage(map, 'obia-rgb', rgbImage(f.planes.r, f.planes.g, f.planes.b, f.w, f.h), grid, p, 1, true);
     const dispChm = showImage(map, 'obia-chm', chmImage(f.planes.chm, f.w, f.h), grid, p, 0.9, layerOn['obia-chm']);
     const t0 = performance.now();
-    const run = runObjectsJob({ grid: { w: f.w, h: f.h, x0: f.x0, y0: f.y0, cellM: 1, epsg: f.epsg }, planes: f.planes, mask: f.mask, params: { ...f.params, mergeSimilarity: 0 }, windowEdge: false, heightBandsM: S.heightBandsM, segmentationVersion: 'fixture-v1', sources: { rgb: 'fixture:rgb', chm: 'fixture:chm', dtm: null }, sentinel: f.sentinel }, () => {});
+    const run = runObjectsJob({ grid: { w: f.w, h: f.h, x0: f.x0, y0: f.y0, cellM: 1, epsg: f.epsg }, planes: f.planes, mask: f.mask, params: { ...f.params, mergeSimilarity: 0 }, windowEdge: false, heightBandsM: S.heightBandsM, segmentationVersion: 'fixture-v1', sources: { rgb: 'fixture:rgb', chm: 'fixture:chm', dtm: null }, sentinel: f.sentinel, sentinelB: f.sentinelB }, () => {});
     job = { label: 'Fixture', stage: 'Segmenting the synthetic scene…', run: run as Running<unknown>, t0 };
     render();
     try {
@@ -1083,14 +1165,14 @@ export function initObia(ctx: Ctx) {
       const s2grid = f.sentinel.rasters[0];
       project = {
         schema: PROJECT_SCHEMA, created: at, updated: at, recipe, recipeHash: recipeHash(recipe), segmentationVersion: 'fixture-v1',
-        sources: [fx('fixture:rgb', 'boundary-imagery', 'RGB', 1), fx('fixture:chm', 'lidar-feature', 'CHM', 1), { ...fx('fixture:sentinel-2', 'spectral-context', 'Sentinel-2', 10), grid: { crs: `EPSG:${f.epsg}`, transform: [s2grid.originX, 10, 0, s2grid.originY, 0, -10], width: s2grid.w, height: s2grid.h, pixelConvention: 'area' } }],
+        sources: [fx('fixture:rgb', 'boundary-imagery', 'RGB', 1), fx('fixture:chm', 'lidar-feature', 'CHM', 1), { ...fx('fixture:sentinel-2', 'spectral-context', 'Sentinel-2', 10), grid: { crs: `EPSG:${f.epsg}`, transform: [s2grid.originX, 10, 0, s2grid.originY, 0, -10], width: s2grid.w, height: s2grid.h, pixelConvention: 'area' } }, fx('fixture:sentinel-2-leaf-off', 'spectral-context', 'Sentinel-2 second date', 10)],
         grid, crsDefinition: p.def, labels: r.labels, count: r.count, objects: r.objects, featureDefs: r.featureDefs, coarsePixels: r.coarsePixels,
-        classes: [{ id: 'Forest', label: 'Forest', colour: '#1b7837' }, { id: 'Meadow', label: 'Meadow', colour: '#e6c84f' }, { id: 'Water', label: 'Water', colour: '#2166ac' }],
+        classes: DEFAULT_CLASSES.map(c => ({ ...c })), coniferScore: r.coniferScore,
         labelEntries: [], references: fixtureReferences().features.map((ft, i) => ({ id: `fixture#${i}`, kind: 'polygon', classId: String(ft.properties!.class), role: 'training', geometry: ft.geometry as GeoJSON.Polygon, file: 'fixture', properties: ft.properties ?? {} })),
         model: null, classification: null, measured: { totalMs: Math.round(performance.now() - t0), objects: r.count, ...Object.fromEntries(Object.entries(r.stageMs).map(([k, v]) => [`${k}Ms`, Math.round(v)])), sentinelIntersection: r.sentinelExact ? 'exact' : 'approximate' },
       };
       proj = p; labels = new LabelStore(); display = { rgb: dispRgb, chm: dispChm }; fixtureLoaded = true; preview = null;
-      activeClass = 'Forest';
+      activeClass = 'forest-conifer';
       // The fixture is 240 × 160 m: 60 m blocks (one per stand row) give enough spatial groups. Session only, not saved.
       S = { ...S, blockM: 60, folds: 4 };
       paintRefs(); reapplyReferences();

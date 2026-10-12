@@ -177,11 +177,16 @@ export const S2_BAND_RES: Record<string, number> = { blue: 10, green: 10, red: 1
 export const S2_INDICES: Record<string, { label: string; a: string; b: string; res: number; formula: string }> = {
   ndvi: { label: 'NDVI', a: 'nir', b: 'red', res: 10, formula: '(B08 − B04) / (B08 + B04), per native 10 m pixel, then area-weighted mean of the pixel index' },
   ndmi: { label: 'NDMI (moisture)', a: 'nir08', b: 'swir16', res: 20, formula: '(B8A − B11) / (B8A + B11), per native 20 m pixel, then area-weighted mean of the pixel index' },
+  ndre: { label: 'NDRE (red edge)', a: 'nir08', b: 'rededge1', res: 20, formula: '(B8A − B05) / (B8A + B05), per native 20 m pixel, then area-weighted mean of the pixel index' },
 };
 
-export function sentinelFeatureDefs(sourceId: string, bands: string[], indices: string[]): FeatureDefinition[] {
+/**
+ * Feature definitions for one scene. `prefix` is `s2` for the main (leaf-on)
+ * scene and `s2b` for the second date; `dateLabel` names it on screen.
+ */
+export function sentinelFeatureDefs(sourceId: string, bands: string[], indices: string[], prefix = 's2', dateLabel = 'Sentinel-2'): FeatureDefinition[] {
   const defs: FeatureDefinition[] = bands.map(b => ({
-    id: `s2_${b}`, label: `Sentinel-2 ${b} reflectance`, sourceIds: [sourceId], group: 'sentinel', operation: 'area-weighted mean of native pixels',
+    id: `${prefix}_${b}`, label: `${dateLabel} ${b} reflectance`, sourceIds: [sourceId], group: 'sentinel', operation: 'area-weighted mean of native pixels',
     parameters: { band: b }, unit: 'reflectance', processingResolutionM: S2_BAND_RES[b], effectiveSupportM: S2_BAND_RES[b],
     sampling: 'native-area-weighted', useForSegmentation: false, useForClassification: true,
   }));
@@ -189,10 +194,23 @@ export function sentinelFeatureDefs(sourceId: string, bands: string[], indices: 
     const ix = S2_INDICES[id];
     if (!ix) continue;
     defs.push({
-      id: `s2_${id}`, label: `Sentinel-2 ${ix.label}`, sourceIds: [sourceId], group: 'sentinel', operation: 'normalized difference per native pixel, then area-weighted mean',
+      id: `${prefix}_${id}`, label: `${dateLabel} ${ix.label}`, sourceIds: [sourceId], group: 'sentinel', operation: 'normalized difference per native pixel, then area-weighted mean',
       parameters: { formula: ix.formula, bands: [ix.a, ix.b], aggregation: 'mean-of-pixel-index' }, unit: 'index (−1…1)',
       processingResolutionM: ix.res, effectiveSupportM: ix.res, sampling: 'native-area-weighted', useForSegmentation: false, useForClassification: true,
     });
   }
   return defs;
+}
+
+/** Seasonal differences: main-scene object mean minus second-date object mean, both at native support. */
+export const SEASONAL_DELTAS = ['ndvi', 'ndre', 'ndmi', 'nir', 'red', 'swir16'];
+
+export function seasonalDeltaDefs(sourceIds: string[]): FeatureDefinition[] {
+  return SEASONAL_DELTAS.map(k => ({
+    id: `d_${k}`, label: `Δ ${S2_INDICES[k]?.label ?? `${k} reflectance`} (main − second date)`, sourceIds, group: 'sentinel' as const,
+    operation: 'difference of the two dates\' area-weighted object means (not a per-pixel difference: the two scenes need not share a grid)',
+    parameters: { a: `s2_${k}`, b: `s2b_${k}` }, unit: S2_INDICES[k] ? 'index difference' : 'reflectance difference',
+    processingResolutionM: S2_INDICES[k]?.res ?? S2_BAND_RES[k], effectiveSupportM: S2_INDICES[k]?.res ?? S2_BAND_RES[k],
+    sampling: 'native-area-weighted' as const, useForSegmentation: false, useForClassification: true,
+  }));
 }

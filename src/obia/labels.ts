@@ -37,13 +37,42 @@ export interface LabelEntry {
   pending?: string;
 }
 
-export const DEFAULT_CLASSES: ClassDef[] = [
+/** The structural classes (level 1). */
+export const STRUCTURE_CLASSES: ClassDef[] = [
   { id: 'forest', label: 'Forest (> 8 m)', colour: '#1b7837', description: 'Closed or open tree canopy above 8 m.' },
-  { id: 'shrub', label: 'Shrub / regeneration', colour: '#7fbc41', description: 'Woody vegetation 0.5–8 m.' },
-  { id: 'herb', label: 'Herbaceous / meadow', colour: '#e6c84f', description: 'Non-woody vegetation under 0.5 m.' },
+  { id: 'shrub', label: 'Shrub / regeneration (0.5–8 m)', colour: '#7fbc41', description: 'Woody vegetation 0.5–8 m.' },
+  { id: 'herb', label: 'Low vegetation (< 0.5 m)', colour: '#e6c84f', description: 'Ground layer: herbs, graminoids, dwarf shrubs, mosses, lichens, seedlings.' },
   { id: 'water', label: 'Open water', colour: '#2166ac', description: 'Standing or flowing water.' },
-  { id: 'built', label: 'Built / bare', colour: '#8c8c8c', description: 'Roads, roofs, gravel, exposed soil.' },
+  { id: 'built', label: 'Built / bare', colour: '#8c8c8c', description: 'Roads, roofs, gravel, exposed soil or rock.' },
 ];
+
+/**
+ * Composition classes (level 2), each under its structural parent, with what
+ * tells it apart. Label at either level: a level-2 label also teaches level 1.
+ */
+export const COMPOSITION_CLASSES: ClassDef[] = [
+  { id: 'forest-conifer', parent: 'forest', label: 'Coniferous forest', colour: '#0b4f2e', description: '≥ 75 % of canopy cover needle-leaved. Evidence: stays green leaf-off (small Δ NDVI), low leaf-on NIR, dark crowns, sharp crown apices.' },
+  { id: 'forest-broadleaf', parent: 'forest', label: 'Broadleaf forest', colour: '#5aae61', description: '≥ 75 % broadleaf. Evidence: large Δ NDVI leaf-on → leaf-off, high leaf-on NIR, bright green rounded crowns.' },
+  { id: 'forest-mixed', parent: 'forest', label: 'Mixed forest', colour: '#2f8a4c', description: 'Neither type ≥ 75 % of canopy cover. Expect intermediate evidence and conifer scores near the split.' },
+  { id: 'shrub-conifer', parent: 'shrub', label: 'Coniferous regeneration / shrub', colour: '#3f7f2a', description: 'Young spruce, fir, pine. Evidence as for coniferous forest, crowns smaller. Tamarack drops its needles: in a leaf-off scene it reads as broadleaf.' },
+  { id: 'shrub-broadleaf', parent: 'shrub', label: 'Broadleaf shrub / regeneration', colour: '#a6d96a', description: 'Alder, willow, birch, maple regeneration. Large seasonal change.' },
+  { id: 'shrub-ericaceous', parent: 'shrub', label: 'Tall ericaceous shrub', colour: '#b2506b', description: 'Rhodora, Labrador tea, sheep laurel, highbush blueberry, mostly 0.5–1.5 m. Evidence: red in autumn (reddish pixels, hue), evergreen species keep NDVI leaf-off.' },
+  { id: 'shrub-mixed', parent: 'shrub', label: 'Mixed shrub', colour: '#86b84a', description: 'No type dominant.' },
+  { id: 'herb-graminoid', parent: 'herb', label: 'Graminoid (grass, sedge, rush)', colour: '#d9c36a', description: 'Evidence: strong senescence (large Δ NDVI, straw-coloured, high yellow hue in autumn), smooth CHM.' },
+  { id: 'herb-ericaceous', parent: 'herb', label: 'Ericaceous dwarf shrub (heath)', colour: '#9e3d5a', description: 'Lowbush blueberry, huckleberry, crowberry, sheep laurel under 0.5 m. Evidence: red in autumn; slight CHM roughness; moderate NDVI.' },
+  { id: 'herb-moss', parent: 'herb', label: 'Moss / Sphagnum', colour: '#7a8f3a', description: 'Bryophyte carpet, often wet. Evidence: high NDMI (wet), little seasonal change, green, red or brown hue, flat CHM. Hard to separate from wet graminoid.' },
+  { id: 'herb-lichen', parent: 'herb', label: 'Lichen', colour: '#c8c8b4', description: 'Cladonia mats and lichen-covered rock. Evidence: pale grey (pale-pixel share), low NDVI, bright in every band, flat.' },
+  { id: 'herb-conifer', parent: 'herb', label: 'Conifer seedlings', colour: '#4c7a3a', description: 'Conifers under 0.5 m. Rarely separable from the ground layer at 1 m; label only where seen.' },
+  { id: 'herb-broadleaf', parent: 'herb', label: 'Broadleaf seedlings / forbs', colour: '#c7e57a', description: 'Broadleaf seedlings and forbs under 0.5 m.' },
+];
+
+export const DEFAULT_CLASSES: ClassDef[] = [...STRUCTURE_CLASSES, ...COMPOSITION_CLASSES];
+
+/** Add any composition class missing from a schema whose parent it has (a schema made before level 2 existed). */
+export function withComposition(classes: ClassDef[]): ClassDef[] {
+  const ids = new Set(classes.map(c => c.id));
+  return [...classes, ...COMPOSITION_CLASSES.filter(c => !ids.has(c.id) && ids.has(c.parent!)).map(c => ({ ...c }))];
+}
 
 /** Labels by object id, with a history of whole operations for undo/redo. */
 export class LabelStore {

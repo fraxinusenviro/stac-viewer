@@ -10,6 +10,16 @@
 //              These are top-surface fractions from a canopy height model, not
 //              return fractions from the point cloud: the denominator is valid
 //              CHM cells, and a shrub under a canopy is not seen.
+//   colour composition (for vegetation TYPE within a structural class)
+//              chroma C* and hue h of the object's mean a*b*; the share of
+//              PALE GREY pixels (L* > 65, C* < 15: lichen mats, bare rock,
+//              senescent litter) and of REDDISH pixels (a* > 10: autumn
+//              ericaceous shrubs, red Sphagnum, red maple)
+//   crown shape (from the CHM, for conifer against broadleaf)
+//              apex sharpness — at each local maximum above 2 m, its height
+//              minus the mean height 2 m away (a cone drops ~4 m there, a
+//              broadleaf dome under 1 m); treetops per hectare; canopy rumple
+//              (CHM surface area / planimetric area)
 //   terrain    mean DTM elevation, mean slope
 //   geometry   area, compactness 4πA/P² (pixel-edge perimeter, so read it
 //              comparatively), elongation √(λ1/λ2) of the pixel coordinates
@@ -34,6 +44,9 @@ export interface FineFeatureInput {
   flags: string[][];
   sources: { rgb: string | null; chm: string | null; dtm: string | null };
 }
+
+/** Distance at which a crown's flank is measured for apex sharpness, m. */
+export const APEX_RING_M = 2;
 
 const quantile = (s: Float64Array, p: number) => { if (!s.length) return NaN; const q = p * (s.length - 1), lo = Math.floor(q), hi = Math.ceil(q); return s[lo] + (s[hi] - s[lo]) * (q - lo); };
 
@@ -63,6 +76,10 @@ export function fineFeatureDefs(inp: Pick<FineFeatureInput, 'cellM' | 'heightBan
     d('rgb_l_sd', 'L* s.d. (texture)', 'rgb', rgb, 'CIE L*', 'standard deviation of per-pixel L*');
     d('rgb_grad', 'Mean L* gradient (edges)', 'rgb', rgb, 'L* per m', 'mean Sobel gradient magnitude of L*');
     d('rgb_exg', 'Excess green', 'rgb', rgb, 'ratio', 'mean of (2G−R−B)/(R+G+B)');
+    d('lab_chroma', 'Chroma C*', 'rgb', rgb, 'CIE C*', 'chroma of the mean a*, b*');
+    d('lab_hue', 'Hue angle h', 'rgb', rgb, '°', 'hue angle of the mean a*, b* (0 red, 90 yellow, 180 green, 270 blue)');
+    d('rgb_pale_frac', 'Share of pale grey pixels', 'rgb', rgb, 'fraction', 'pixels with L* > 65 and C* < 15 / valid imagery pixels');
+    d('rgb_red_frac', 'Share of reddish pixels', 'rgb', rgb, 'fraction', 'pixels with a* > 10 / valid imagery pixels');
   }
   if (inp.planes.chm) {
     d('chm_mean', 'CHM mean', 'structure', chm, 'm', 'mean', { useForSegmentation: true });
@@ -70,6 +87,9 @@ export function fineFeatureDefs(inp: Pick<FineFeatureInput, 'cellM' | 'heightBan
     d('chm_p90', 'CHM P90', 'structure', chm, 'm', '90th percentile');
     d('chm_max', 'CHM max', 'structure', chm, 'm', 'maximum');
     d('chm_sd', 'CHM s.d.', 'structure', chm, 'm', 'standard deviation');
+    d('chm_apex', 'Crown apex sharpness', 'structure', chm, 'm', 'mean over local maxima > 2 m of (height − mean height 2 m away)', { parameters: { ringM: APEX_RING_M, minHeightM: 2 } });
+    d('chm_tops_ha', 'Treetops per hectare', 'structure', chm, 'per ha', 'local maxima > 2 m (3 × 3 window) per hectare of valid CHM');
+    d('chm_rumple', 'Canopy rumple', 'structure', chm, 'ratio', 'CHM surface area / planimetric area (central differences)');
     for (const b of bandIds(inp.heightBandsM)) d(b.id, b.label, 'structure', chm, 'fraction', 'valid CHM cells in band / valid CHM cells', { parameters: { loM: b.lo, hiM: b.hi } });
   }
   if (inp.planes.dtm) {
@@ -109,6 +129,26 @@ export function fineFeatures(inp: FineFeatureInput): ObjectRecord[] {
   }
   const slope = planes.dtm ? slopeDeg(planes.dtm, w, h, cellM) : null;
   const bands = bandIds(inp.heightBandsM);
+  // Crown shape: apex sharpness at local maxima, and per-pixel surface ratio.
+  let apex: Float32Array | null = null, rumple: Float32Array | null = null;
+  if (planes.chm) {
+    const c = planes.chm, R = Math.max(1, Math.round(APEX_RING_M / cellM));
+    apex = new Float32Array(n).fill(NaN); rumple = new Float32Array(n).fill(NaN);
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x, v = c[i];
+      if (v !== v) continue;
+      const gx = (c[i + 1] - c[i - 1]) / (2 * cellM), gy = (c[i + w] - c[i - w]) / (2 * cellM);
+      const sr = Math.sqrt(1 + gx * gx + gy * gy);
+      if (sr === sr) rumple[i] = sr;
+      if (v <= 2 || y < R || x < R || y >= h - R || x >= w - R) continue;
+      let peak = true;
+      for (let dy = -1; dy <= 1 && peak; dy++) for (let dx = -1; dx <= 1; dx++) { if ((dx || dy) && !(c[i + dy * w + dx] <= v)) { peak = false; break; } }
+      if (!peak) continue;
+      let sum = 0, k = 0;
+      for (let d = -R; d <= R; d++) for (const [xx, yy] of [[x + d, y - R], [x + d, y + R], [x - R, y + d], [x + R, y + d]]) { const u = c[yy * w + xx]; if (u === u) { sum += u; k++; } }
+      if (k) apex[i] = v - sum / k;
+    }
+  }
 
   const out: ObjectRecord[] = [];
   for (let k = 0; k < count; k++) {
@@ -146,6 +186,13 @@ export function fineFeatures(inp: FineFeatureInput): ObjectRecord[] {
       let ex = 0, ec = 0;
       for (let j = s; j < e; j++) { const i = px[j], R = planes.r[i], G = planes.g[i], Bb = planes.b[i], t = R + G + Bb; if (t === t && t > 0) { ex += (2 * G - R - Bb) / t; ec++; } }
       fv.rgb_exg = ec ? ex / ec : null;
+      const am = meanOf(A).mean, bm = meanOf(B).mean;
+      fv.lab_chroma = nn(Math.hypot(am, bm));
+      fv.lab_hue = Number.isFinite(am) && Number.isFinite(bm) ? (Math.atan2(bm, am) * 180 / Math.PI + 360) % 360 : null;
+      let pale = 0, red = 0, lc = 0;
+      for (let j = s; j < e; j++) { const i = px[j], LL = L[i]; if (LL !== LL) continue; lc++; const C = Math.hypot(A[i], B[i]); if (LL > 65 && C < 15) pale++; if (A[i] > 10) red++; }
+      fv.rgb_pale_frac = lc ? pale / lc : null;
+      fv.rgb_red_frac = lc ? red / lc : null;
       support.rgb = { validFraction: l.c / m, qualityFlags: l.c < m ? ['partial-imagery'] : [] };
     }
     if (planes.chm) {
@@ -158,6 +205,13 @@ export function fineFeatures(inp: FineFeatureInput): ObjectRecord[] {
       fv.chm_max = c ? sorted[c - 1] : null;
       fv.chm_sd = c > 1 ? Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / (c - 1)) : null;
       for (const bd of bands) { let z = 0; for (const x of v) if (x >= bd.lo && x < bd.hi) z++; fv[bd.id] = c ? z / c : null; }
+      if (apex && rumple) {
+        let as = 0, ac = 0, rs = 0, rc = 0;
+        for (let j = s; j < e; j++) { const i = px[j]; if (apex[i] === apex[i]) { as += apex[i]; ac++; } if (rumple[i] === rumple[i]) { rs += rumple[i]; rc++; } }
+        fv.chm_apex = ac ? as / ac : null;
+        fv.chm_tops_ha = c ? ac / (c * area / 1e4) : null;
+        fv.chm_rumple = rc ? rs / rc : null;
+      }
       support.structure = { validFraction: c / m, qualityFlags: c === 0 ? ['no-chm'] : c < m ? ['partial-chm'] : [] };
     }
     if (planes.dtm && slope) {

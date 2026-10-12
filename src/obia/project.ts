@@ -35,6 +35,9 @@ export interface ClassificationRecord {
   ablation: ClassifyResult['ablation'];
   validation: ClassifyResult['validation'];
   trainedOn: number;
+  /** Level-2 composition models (their forests are stored here, not in `model`). Absent on pre-hierarchy projects. */
+  sublevels?: ClassifyResult['sublevels'];
+  skipped?: ClassifyResult['skipped'];
   /** Labels and recipe the model was fitted against, so staleness can be stated. */
   labelsHash: string;
   segmentationVersion: string;
@@ -62,6 +65,8 @@ export interface ObiaProject {
   references: ReferenceFeature[];
   model: Forest | null;
   classification: ClassificationRecord | null;
+  /** The within-run conifer score's calibration (absent before it existed). */
+  coniferScore?: import('./composition.ts').ScoreReport;
   /** Measured stage times and sizes, for the performance report. */
   measured: Record<string, number | string>;
 }
@@ -135,7 +140,7 @@ export function objectsGeoJSON(p: ObiaProject, proj: Projector): GeoJSON.Feature
     const lab = labelBy.get(o.id);
     const props: Record<string, unknown> = {
       object_id: o.id, segmentation_version: o.segmentationVersion, area_m2: round(o.areaM2),
-      predicted: o.predictedClass ?? null, reviewed: o.reviewedClass ?? null,
+      predicted: o.predictedClass ?? null, predicted_structure: o.predictedParent ?? null, reviewed: o.reviewedClass ?? null,
       label: lab && lab.role !== 'review' ? lab.classId : null, label_role: lab?.role ?? null, label_source: lab?.source ?? null,
       score_margin: o.classScores ? round(margin(o.classScores)) : null,
       flags: o.flags.join(';'),
@@ -172,8 +177,8 @@ const csvCell = (v: unknown) => (v === null || v === undefined ? '' : typeof v =
 /** One row per object: identity, class, centroid (analysis CRS), support, every feature. */
 export function featuresCsv(p: ObiaProject): string {
   const supKeys = [...new Set(p.objects.flatMap(o => Object.keys(o.support)))].sort();
-  const head = ['object_id', 'segmentation_version', 'area_m2', 'cx', 'cy', 'predicted', 'reviewed', 'flags', ...supKeys.flatMap(k => [`support_${k}_valid`, `support_${k}_native_px`, `support_${k}_n_eff`]), ...p.featureDefs.map(d => d.id)];
-  const rows = p.objects.map(o => [o.id, o.segmentationVersion, round(o.areaM2), round(o.cx), round(o.cy), o.predictedClass ?? '', o.reviewedClass ?? '', o.flags.join(';'),
+  const head = ['object_id', 'segmentation_version', 'area_m2', 'cx', 'cy', 'predicted', 'predicted_structure', 'reviewed', 'flags', ...supKeys.flatMap(k => [`support_${k}_valid`, `support_${k}_native_px`, `support_${k}_n_eff`]), ...p.featureDefs.map(d => d.id)];
+  const rows = p.objects.map(o => [o.id, o.segmentationVersion, round(o.areaM2), round(o.cx), round(o.cy), o.predictedClass ?? '', o.predictedParent ?? '', o.reviewedClass ?? '', o.flags.join(';'),
     ...supKeys.flatMap(k => [round(o.support[k]?.validFraction), o.support[k]?.nativePixelCount ?? '', round(o.support[k]?.effectivePixelCount)]),
     ...p.featureDefs.map(d => round(o.featureValues[d.id]))].map(csvCell).join(','));
   // Plain RFC 4180: cx/cy are in the analysis CRS (stated in the bundle manifest); a blank cell is missing, never zero.
@@ -184,7 +189,7 @@ export function featuresCsv(p: ObiaProject): string {
 export function modelBundle(p: ObiaProject): string {
   if (!p.model) throw new Error('no model has been trained');
   return JSON.stringify({
-    kind: 'stac-viewer-obia-model/1', model: p.model, classes: p.classes, classification: p.classification,
+    kind: 'stac-viewer-obia-model/1', model: p.model, compositionModels: (p.classification?.sublevels ?? []).map(l => ({ parent: l.parent, model: l.model })), classes: p.classes, classification: p.classification,
     featureDefinitions: p.featureDefs.filter(d => p.model!.features.includes(d.id)), recipeHash: p.recipeHash, segmentationVersion: p.segmentationVersion,
     note: 'Scores are Random Forest vote shares, not calibrated probabilities. Missing values are imputed with the stored training medians.',
   });

@@ -48,7 +48,7 @@ export interface SourceAsset {
   attribution?: string;
 }
 
-export type FeatureGroup = 'rgb' | 'structure' | 'terrain' | 'sentinel' | 'quality' | 'geometry';
+export type FeatureGroup = 'rgb' | 'structure' | 'terrain' | 'sentinel' | 'quality' | 'geometry' | 'index';
 
 export interface FeatureDefinition {
   id: string;
@@ -91,8 +91,12 @@ export interface ObjectRecord {
   featureValues: Record<string, number | null>;
   support: Record<string, SupportRecord>;
   referenceClass?: string;
+  /** The deepest class predicted (composition where a level-2 model exists). */
   predictedClass?: string;
   classScores?: Record<string, number>;
+  /** The level-1 (structural) prediction and its scores. */
+  predictedParent?: string;
+  parentScores?: Record<string, number>;
   reviewedClass?: string;
   flags: string[];
 }
