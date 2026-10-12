@@ -20,7 +20,7 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
 #app { display: grid; grid-template-columns: 360px 1fr; height: 100dvh; }
-#side { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border-right: 1px solid var(--line); }
+#side { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--panel); border-right: 1px solid var(--line); }
 #map { min-height: 0; }
 header { padding: 14px 16px 6px; }
 h1 { font-size: 18px; margin: 0 0 2px; }
@@ -125,9 +125,47 @@ details.panel[open] > summary { margin-bottom: 6px; }
 .cmp td:first-child { max-width: 120px; }
 
 @media (max-width: 760px) {
-  #app { grid-template-columns: 1fr; grid-template-rows: 52dvh 1fr; }
+  /* minmax(0, …): a long option in a select must not widen the column past the screen. */
+  #app { grid-template-columns: minmax(0, 1fr); grid-template-rows: 52dvh 1fr; }
   #side { order: 2; border-right: 0; border-top: 1px solid var(--line); }
   #map { order: 1; }
   header p { display: none; }
   input, select { font-size: 16px; }
 }
+
+/* ── Fusion: Set up / Results, numbered steps (FieldMapper's HabLab chrome) ── */
+.subtabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 4px 0 8px; position: sticky; top: -8px; background: var(--panel); z-index: 1; padding-top: 4px; }
+.subtab { flex: 1; min-height: 40px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font: inherit; font-weight: 600; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.subtab.on { color: var(--text); border-bottom-color: var(--accent); }
+.subtab-n { font-size: 11px; font-weight: 700; min-width: 18px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--text); }
+.subtab-n.open { border-color: #d9a441; background: rgba(217,164,65,0.15); }
+.step { border-bottom: 1px solid var(--line); padding: 6px 0 12px; }
+.step:last-child { border-bottom: 0; }
+.step-h { display: flex; align-items: center; gap: 10px; margin: 6px 0 8px; font-size: 14px; font-weight: 700; }
+.step-n { width: 24px; height: 24px; flex: none; border-radius: 50%; border: 1.5px solid var(--muted); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; }
+.step-right { font-size: 12px; font-weight: 400; color: var(--muted); max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-body { display: flex; flex-direction: column; gap: 8px; }
+.step-body > p { margin: 0; }
+.segbar { display: flex; width: 100%; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg); }
+.segbar-btn { flex: 1 1 0; min-width: 0; min-height: 36px; border: 0; border-left: 1px solid var(--line); background: transparent; color: var(--text); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; padding: 4px 6px; }
+.segbar-btn:first-child { border-left: 0; }
+.segbar-btn:hover:not(:disabled):not(.on) { background: var(--panel); }
+.segbar-btn.on { background: var(--accent); color: var(--accent-text); }
+.segbar-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.segbar-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.chip:disabled, .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.chip.danger { color: var(--error); }
+.runlog { margin: 0; }
+.log { list-style: none; margin: 0; padding: 0; max-height: 180px; overflow-y: auto; font-size: 12px; display: flex; flex-direction: column; gap: 2px; font-variant-numeric: tabular-nums; }
+.log-error { color: var(--error); }
+.log-ok { font-weight: 600; }
+.results { display: flex; flex-direction: column; gap: 10px; }
+.results > p { margin: 0; }
+.res-card { border: 1px solid var(--line); border-radius: 10px; background: var(--bg); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.res-card p { margin: 0; }
+.res-card.res-hidden { opacity: 0.65; }
+.res-head { flex-wrap: nowrap; }
+.res-title { min-width: 0; overflow-wrap: anywhere; }
+.badge { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 999px; border: 1px solid #d9a441; background: rgba(217,164,65,0.15); }
+.badge.ok { border-color: var(--accent); background: transparent; color: var(--accent); }
+.legend .pct { width: 44px; text-align: right; }

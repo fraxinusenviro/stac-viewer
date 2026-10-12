@@ -12,23 +12,26 @@
 // (resolution 13, ~44 m², the cell's centre; and resolution 11, ~2 150 m², for
 // roll-ups and joins with other H3 data).
 //
-// Written as GeoParquet 1.1 (cell polygons in lon/lat, WKB) or CSV. A cell
-// less than half covered by the view is left out.
+// Written as GeoParquet 1.1 (cell polygons in lon/lat, WKB) or CSV. Only the
+// 2 m pixels inside the study area's polygon are aggregated, and a cell less
+// than half covered by them is left out.
 
 import proj4 from 'proj4';
 import { projDef } from '../crs.ts';
 import { openFile, sampleGrid, type InputSource } from '../engine.ts';
 import { FUSION_VARIABLES, type Product, type ProductStyle } from '../products.ts';
-import { controlGrid, interpGrid, type LonLatBox } from '../warp.ts';
+import { controlGrid, interpGrid } from '../warp.ts';
 import { objectPlanes } from './objects.ts';
-import { mercatorGrid } from './segmentView.ts';
+import { mercatorGrid, maxAreaKm2 } from './segmentView.ts';
+import { aoiBox, polygonMask } from '../aoi.ts';
 
 import type { FeatureTable, TableColumn } from './featureTableExport.ts';
 export type { FeatureTable, TableColumn } from './featureTableExport.ts';
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
 
-export async function buildFeatureTable(box: LonLatBox, sources: Record<string, InputSource>, cellM: 10 | 20, product: Product | null, style: ProductStyle | null, stage: (m: string) => void): Promise<FeatureTable> {
+export async function buildFeatureTable(area: GeoJSON.Polygon, sources: Record<string, InputSource>, cellM: 10 | 20, product: Product | null, style: ProductStyle | null, stage: (m: string) => void): Promise<FeatureTable> {
+  const box = aoiBox(area);
   // The lattice: the Sentinel-2 scene's own, when there is one.
   let epsg: number, originX = 0, originY = 0, lattice: string;
   const s2 = sources['s2:nir'] ?? sources['s2:red'];
@@ -45,8 +48,9 @@ export async function buildFeatureTable(box: LonLatBox, sources: Record<string, 
   if (!def) throw new Error(`EPSG:${epsg} is not defined here`);
   const conv = proj4('EPSG:4326', def);
   const grid = mercatorGrid(box, 2);
-  if (grid.cellM > 4) throw new Error(`the view is too large for a feature table (it would sample at ${grid.cellM.toFixed(0)} m) — zoom in to about level 15`);
-  stage(`Reading every input over the view at ${grid.cellM.toFixed(1)} m…`);
+  if (grid.cellM > 4) throw new Error(`the study area is too large for a feature table (it would sample at ${grid.cellM.toFixed(0)} m) — use one under about ${maxAreaKm2(4)} km²`);
+  const mask = polygonMask(grid, area);
+  stage(`Reading every input over the study area at ${grid.cellM.toFixed(1)} m…`);
   const planes = await sampleGrid(sources, grid, product?.sharpen);
   stage('Aggregating into cells…');
   await new Promise(r => setTimeout(r, 0));
@@ -60,6 +64,7 @@ export async function buildFeatureTable(box: LonLatBox, sources: Record<string, 
   for (let py = 0; py < grid.h; py++) for (let px = 0; px < grid.w; px++) {
     interpGrid(cg, px + 0.5, py + 0.5, p);
     const ix = Math.floor(p[0]), iy = Math.floor(p[1]), key = `${ix},${iy}`;
+    if (!mask[py * grid.w + px]) { label[py * grid.w + px] = -1; continue; }
     let k = index.get(key);
     if (k === undefined) { k = cells.length; index.set(key, k); cells.push({ ix, iy }); }
     label[py * grid.w + px] = k;
@@ -90,9 +95,10 @@ export async function buildFeatureTable(box: LonLatBox, sources: Record<string, 
     const counts = new Map<number, Float32Array>();
     const classified = new Float32Array(cells.length);
     for (let i = 0; i < n; i++) {
+      const k = label[i];
+      if (k < 0) continue;
       const c = fn(planes, i, style);
       if (c !== c) continue;
-      const k = label[i];
       (counts.get(c) ?? counts.set(c, new Float32Array(cells.length)).get(c)!)[k]++;
       classified[k]++;
     }
@@ -105,7 +111,8 @@ export async function buildFeatureTable(box: LonLatBox, sources: Record<string, 
     }
   }
   const rowOf = new Int32Array(n);
-  for (let i = 0; i < n; i++) rowOf[i] = rowOfCell[label[i]];
+  for (let i = 0; i < n; i++) rowOf[i] = label[i] >= 0 ? rowOfCell[label[i]] : -1;
+  if (!rows.length) throw new Error('no cell is at least half inside the study area');
   return { epsg, cellM, originX, originY, rows, columns, shares, grid, rowOf, lattice };
 }
 

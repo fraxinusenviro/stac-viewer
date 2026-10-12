@@ -1,12 +1,15 @@
-// "Segment this view": sample every input over the view on one fine grid,
+// Segment a study area: sample every input over the area on one fine grid,
 // segment it (slic.ts), turn the segments into objects and classify them with
 // the product the pixel map uses (objects.ts), and draw the result as one
 // image over the map with the object boundaries in it.
 //
-// A view, not map tiles, because a segment does not stop at a tile edge. The
-// grid is linear in Web Mercator, so the image lies on the map exactly, and
-// its pixels are square on the ground (2 m wherever the view is small enough,
-// coarser past ~1.2 M pixels; refused past 8 m — zoom in).
+// One grid over the area, not map tiles, because a segment does not stop at a
+// tile edge. The grid covers the area's bounding box and is then MASKED to its
+// polygon: a segment cut by the boundary keeps only its inside pixels, and one
+// wholly outside is dropped. The grid is linear in Web Mercator, so the image
+// lies on the map exactly, and its pixels are square on the ground (2 m
+// wherever the area is small enough, coarser past ~1.2 M pixels; refused past
+// 8 m — use a smaller study area).
 //
 // Segments are drawn on canopy height and, when there is one, the
 // orthophoto's brightness and greenness — the structure and the sub-metre
@@ -18,6 +21,7 @@ import type { LonLatBox, OutGrid } from '../warp.ts';
 import { mergeRegions, slic } from './slic.ts';
 import { crowns, smooth3 } from './crowns.ts';
 import { classifyObjects, objectPlanes, ringsToPolygons, traceRings, type ObjectSet } from './objects.ts';
+import { aoiBox, maskLabels, polygonMask } from '../aoi.ts';
 
 export interface SegmentParams {
   /** Patches (superpixels merged) or tree crowns (canopy height model). */
@@ -39,6 +43,8 @@ export interface SegmentGrid extends OutGrid { box: LonLatBox; cellM: number }
 
 export interface SegmentResult {
   grid: SegmentGrid;
+  /** 1 inside the study area. */
+  mask: Uint8Array;
   labels: Int32Array;
   count: number;
   objs: ObjectSet;
@@ -48,7 +54,9 @@ export interface SegmentResult {
   features: string[];
 }
 
-const MAX_PX = 1_200_000;
+export const MAX_PX = 1_200_000;
+/** The largest study area, km², a grid refused past `cellM` metres can hold. */
+export const maxAreaKm2 = (cellM: number) => Math.round((MAX_PX * cellM * cellM) / 1e5) / 10;
 const R = 6378137;
 const mercY = (lat: number) => R * Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
 const latOf = (y: number) => (360 / Math.PI) * Math.atan(Math.exp(y / R)) - 90;
@@ -107,12 +115,13 @@ function featuresOf(p: Planes, n: number): { list: Float32Array[]; names: string
   return { list, names };
 }
 
-export async function segmentView(box: LonLatBox, sources: Record<string, InputSource>, product: Product | null, style: ProductStyle | null, params: SegmentParams, stage: (msg: string) => void): Promise<SegmentResult> {
+export async function segmentView(area: GeoJSON.Polygon, sources: Record<string, InputSource>, product: Product | null, style: ProductStyle | null, params: SegmentParams, stage: (msg: string) => void): Promise<SegmentResult> {
   const crownMode = params.method === 'crowns';
-  const grid = mercatorGrid(box, crownMode ? 1 : 2);
-  if (crownMode && grid.cellM > 1.5) throw new Error(`crowns need ~1 m pixels and this view would get ${grid.cellM.toFixed(1)} m — zoom in to about level 17`);
-  if (grid.cellM > 8) throw new Error(`the view is too large to segment (it would need ${grid.cellM.toFixed(0)} m pixels) — zoom in to about level 15`);
-  stage(`Reading every input over the view at ${grid.cellM.toFixed(1)} m (${grid.w} × ${grid.h} pixels)…`);
+  const grid = mercatorGrid(aoiBox(area), crownMode ? 1 : 2);
+  if (crownMode && grid.cellM > 1.5) throw new Error(`crowns need ~1 m pixels and this study area would get ${grid.cellM.toFixed(1)} m — use one under about ${maxAreaKm2(1.5)} km²`);
+  if (grid.cellM > 8) throw new Error(`the study area is too large to segment (it would need ${grid.cellM.toFixed(0)} m pixels) — use one under about ${maxAreaKm2(8)} km²`);
+  const mask = polygonMask(grid, area);
+  stage(`Reading every input over the study area at ${grid.cellM.toFixed(1)} m (${grid.w} × ${grid.h} pixels)…`);
   const planes = await sampleGrid(sources, grid, product?.sharpen);
   const n = grid.w * grid.h;
   let merged: { labels: Int32Array; count: number }, names: string[];
@@ -134,10 +143,12 @@ export async function segmentView(box: LonLatBox, sources: Record<string, InputS
     merged = mergeRegions(sp.labels, sp.count, grid.w, grid.h, smooth, params.merge * step * step);
     names = f.names;
   }
+  merged = maskLabels(merged.labels, mask);
+  if (!merged.count) throw new Error('no object lies inside the study area');
   const objs = objectPlanes(merged.labels, merged.count, grid.w, grid.h, planes, grid.cellM);
   if (params.heightStat === 'p90') useP90Height(objs);
   const classes = product?.classes && style ? classifyObjects(product, objs, style) : null;
-  return { grid, labels: merged.labels, count: merged.count, objs, product, classes, features: names };
+  return { grid, mask, labels: merged.labels, count: merged.count, objs, product, classes, features: names };
 }
 
 /**

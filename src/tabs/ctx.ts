@@ -23,3 +23,10 @@ export const shared = {
 };
 
 export const itemName = (it: HrdemItem) => (it.kind === 'project' ? it.id : `National ${it.kind.replace('mosaic-', '')} mosaic`);
+
+/**
+ * Who a map tap belongs to. Drawing a study area and tapping samples both
+ * take taps that would otherwise inspect a result; whoever holds the claim
+ * gets them, and every other click handler stands aside.
+ */
+export const mapClaim = { owner: null as null | 'aoi' | 'sample' };

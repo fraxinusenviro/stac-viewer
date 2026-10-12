@@ -410,11 +410,12 @@ export function sampleGrid(sources: Record<string, InputSource>, grid: OutGrid, 
 }
 
 /** Every plane of a set of inputs over a view, on a ~256 px grid (for calibrations). */
-export async function sampleView(sources: Record<string, InputSource>, box: LonLatBox, sharpen?: { keys: string[]; params: UnmixParams }): Promise<{ planes: Planes; n: number }> {
+export async function sampleView(sources: Record<string, InputSource>, box: LonLatBox, sharpen?: { keys: string[]; params: UnmixParams }): Promise<{ planes: Planes; n: number; grid: OutGrid & { box: LonLatBox } }> {
   const midLat = ((box[1] + box[3]) / 2) * Math.PI / 180;
   const aspect = ((box[2] - box[0]) * Math.cos(midLat)) / (box[3] - box[1] || 1e-9);
   // Sharpening needs several output pixels per Sentinel pixel, hence the finer grid.
   const S = sharpen ? 512 : 256;
   const w = Math.max(16, Math.round(aspect >= 1 ? S : S * aspect)), h = Math.max(16, Math.round(aspect >= 1 ? S / aspect : S));
-  return { planes: await planesFor(sources, boxGrid(box, w, h), sharpen), n: w * h };
+  const grid = boxGrid(box, w, h);
+  return { planes: await planesFor(sources, grid, sharpen), n: w * h, grid: { ...grid, box } };
 }

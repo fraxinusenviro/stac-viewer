@@ -13,11 +13,40 @@ storage.
 | Point clouds | NRCan CanElevation COPC tiles on S3 | A static GeoParquet tile index (`public/data/`) searched with [hyparquet](https://github.com/hyparam/hyparquet) by HTTP range reads. Only the row groups whose bbox statistics meet the view are read. |
 | Rasters | NRCan datacube STAC (`hrdem-lidar`, `hrdem-mosaic-1m/2m`) | Seven products per source: **DTM** (bare earth) or **DSM** (surface incl. trees and buildings), each as hillshade, elevation or shaded elevation, and the **canopy height model** (DSM − DTM), added as separate layers. The colour ramp is stretched to the view (2nd–98th percentile). COGs in EPSG:3979, range-read with geotiff.js and warped into map tiles in the browser. Projects are filtered by their **true** coverage (`extent` asset), not their STAC envelope. |
 | Imagery | Element 84 Earth Search, `sentinel-2-c1-l2a` | True colour (TCI), natural colour, false colour IR, agriculture, SWIR and geology composites; NDVI, EVI, SAVI, GNDVI, NDRE, NDMI, NDWI, MNDWI, NBR and NDBI; SCL classes; any single band; custom RGB. Per-channel histogram with 2–98 % / Min/Max, curve (linear, square root, log), gamma and nodata, as in the reference explorer. Values are **reflectance**, from each asset's STAC `raster:bands` scale and offset (the baseline ≥ 04.00 BOA offset included). |
-| Fusion | Both of the above, per pixel | **Rule-based classes** from a rule set you edit (below), the **structure · greenness · water** composite (CHM · NDVI · NDWI as RGB), and a **custom fusion RGB** of any variable. An optional **leaf-off scene** adds leaf-off indices and bands and the seasonal change (Δ NDVI, Δ EVI, Δ NIR…). "Find inputs for this view" picks the newest LiDAR project with a DSM, the clearest leaf-on scene (June–September) and the clearest leaf-off one (late April–mid May, or November) of the last three years. |
+| Fusion | Both of the above, per pixel | **Rule-based classes** from a rule set you edit (below), the **structure · greenness · water** composite (CHM · NDVI · NDWI as RGB), and a **custom fusion RGB** of any variable. An optional **leaf-off scene** adds leaf-off indices and bands and the seasonal change (Δ NDVI, Δ EVI, Δ NIR…). "Find inputs for the study area" picks the newest LiDAR project with a DSM, the clearest leaf-on scene (June–September) and the clearest leaf-off one (late April–mid May, or November) of the last three years. |
 
 The approach follows [taylor-geospatial/s2-stac-geoparquet](https://github.com/taylor-geospatial/s2-stac-geoparquet):
 a static index on object storage, a pure-JS parquet reader instead of DuckDB-WASM, `cache: "no-store"`
 range reads, and client-side COG warping through a proj4 control grid.
+
+## Study areas, analyses and results
+
+The Fusion tab is laid out as FieldMapper's HabLab tools are: two pages, **Set up** and **Results**, and Set up in four
+numbered steps.
+
+1. **Study area**: *This view* (the map view when Run is pressed), a *Saved area*, or *Draw* a polygon or rectangle on
+   the map and name it. Areas are kept in this browser, can be renamed, zoomed to, deleted, and imported or exported as
+   GeoJSON. Every analysis reads the area's bounding box and is then **masked to its outline**: an object cut by the
+   outline keeps only its inside part, a cell less than half inside is left out, and nothing outside counts towards a
+   class area. The conifer index is calibrated on the area's woody pixels, and "Find inputs" searches the area.
+2. **Inputs**: LiDAR, leaf-on and leaf-off scenes, orthophoto and point cloud.
+3. **Classes**: strata × cover or rules (or a composite), with the on-screen pixel preview, the conifer index and
+   sample comparison.
+4. **Analysis**: one tool at a time from a segmented bar, with its parameters and one Run button naming the area it
+   runs on. A tool that cannot run says why (Class areas needs classes). Progress and outcomes go to a folded **run log**.
+   - **Class areas**: the classes at every pixel of the area (2 m where the area allows, up to ~120 km² at 10 m), with
+     hectares and share per class, and the unclassified remainder.
+   - **Objects**: patches or tree crowns (below).
+   - **Feature table**: one row per Sentinel-2 pixel (below).
+
+A run that produces something switches to **Results**. Results accumulate: every run is a card and a map layer of its
+own (newest on top, its area outlined), so two areas, or one area under two rule sets, sit side by side. A card states
+what the run was made from (area, classes, input dates, time) and its class table, and offers show/hide, opacity, zoom,
+downloads (class-areas CSV, objects GeoJSON, GeoParquet or CSV), **Run again**, **Save area** for a run made on the view,
+and **Discard**. When the classes or inputs change after a run, its card says so and offers to run it again on the same
+area. Tapping the map inspects the topmost visible result. Results live in the tab's memory: a card is marked until it
+is downloaded, and leaving the page with any not downloaded asks first. *Class areas of every run* writes one CSV of
+all of them for comparison.
 
 ## Strata × cover classes
 
@@ -80,7 +109,7 @@ It applies from about zoom 15, where a Sentinel pixel spans several screen pixel
 ## Conifer index (FieldMapper method)
 
 Ported from FieldMapper's `conifer_index` (`lib/habitat/models/landcover.ts`). Each line of evidence becomes a robust
-z-score over the woody pixels in view (canopy ≥ 3 m, NDVI ≥ 0.4), signed so that positive means needle-leaved, and the
+z-score over the woody pixels of the study area (canopy ≥ 3 m, NDVI ≥ 0.4), signed so that positive means needle-leaved, and the
 scores are averaged by weight. Otsu places the split, and Sarle's bimodality coefficient (above ~0.555) says whether there
 are really two groups. The point-cloud terms (laser intensity, canopy attenuation) are not available from HRDEM rasters,
 so the raster-only variants use Sentinel-2's: − NIR 0.35 · − visible brightness 0.20 · − excess green 0.15, plus − ΔNDVI 0.35 and
@@ -125,12 +154,12 @@ Orthophoto pixels are computed in the viewer's browser from the tiles the servic
 redistributed. Whether NSODB permits derived products beyond that has not been confirmed; the downloadable files are
 sold under a restricted licence. This is a proof of concept, not a production map.
 
-## Segment this view (object-based classification)
+## Objects (object-based classification)
 
-"Segment this view" in the Fusion tab classifies **objects** instead of pixels (`src/segment/`):
+The **Objects** analysis classifies **objects** instead of pixels (`src/segment/`):
 
-1. Every input is sampled over the view on one grid. The grid is linear in Web Mercator, so the result lies exactly on
-   the map, and its pixels are 2 m (coarser past ~1.2 M pixels; refused past 8 m, so zoom in to about level 15).
+1. Every input is sampled over the study area on one grid, masked to its outline. The grid is linear in Web Mercator, so
+   the result lies exactly on the map, and its pixels are 2 m (coarser past ~1.2 M pixels; refused past 8 m, about 77 km²).
 2. **Superpixels** (SLIC) are drawn on canopy height and, when an orthophoto is chosen, its brightness and excess green,
    after a 3 × 3 smoothing. The coarse imagery is deliberately left out, so it does not draw 10 m squares.
 3. Neighbouring superpixels are **merged** by Felzenszwalb–Huttenlocher's criterion: uniform ground joins into larger
@@ -141,7 +170,7 @@ sold under a restricted licence. This is a proof of concept, not a production ma
 5. The object is classified by the **same rules or strata** the pixel map uses, evaluated once per object. An index is
    computed from the object's mean reflectance and a stratum from its mean canopy height.
 
-**Tree crowns** (Objects → Tree crowns, zoom ~17, 1 m pixels) replace the patches with individual crowns: treetops are
+**Tree crowns** (Objects → Tree crowns, 1 m pixels, an area under ~2.7 km²) replace the patches with individual crowns: treetops are
 local maxima of the smoothed canopy height model within a window that widens with height, and crowns grow from them
 downhill, tallest first, while a pixel stays above the minimum tree height, above 0.45 × its treetop and within a
 height-dependent radius (Dalponte & Coomes 2016, as in lidR). What no crown reaches is left out. This finds dominant and
@@ -153,11 +182,11 @@ every height rule, so a stand with gaps is classed by its canopy, not by the ave
 Tap an object for its values. **Download GeoJSON** writes every object as a polygon traced along the pixel edges, with its
 class and every variable that can be evaluated on it as attributes (about 55 with all sources on). On a 1.8 × 1.5 km view
 at zoom 16 this is ~3,000 objects in ~17 s, most of it reading the inputs. It is a proof of concept: objects are
-classified when segmented, so after editing rules, segment again.
+classified when segmented; after editing rules the result's card says so and offers **Run again**.
 
 ## Feature table (grid export)
 
-**Build for this view** produces one row per cell of **Sentinel-2's own pixel lattice** (10 or 20 m, in the scene's UTM
+The **Feature table** analysis produces one row per cell of **Sentinel-2's own pixel lattice** (10 or 20 m, in the scene's UTM
 CRS, aligned to its COG origin), so the imagery is never resampled; each cell is a Sentinel pixel. Every finer input (1 m
 LiDAR, point-cloud metrics, orthophoto) is sampled at 2 m and averaged into the cell. Each row also carries:
 
@@ -168,7 +197,7 @@ LiDAR, point-cloud metrics, orthophoto) is sampled at 2 m and averaged into the 
 
 Any column can be previewed on the map, and a cell can be tapped. The download is **GeoParquet 1.1** (cell polygons in
 lon/lat as WKB; opens in DuckDB, QGIS, GDAL, pandas/GeoPandas) or CSV. A 1.5 × 1.2 km view at zoom 16 gives ~6,700 cells ×
-67 columns in ~16 s (2 MB of GeoParquet). Cells less than half inside the view are left out. h3-js and the parquet
+67 columns in ~16 s (2 MB of GeoParquet). Cells less than half inside the study area are left out. h3-js and the parquet
 writer load only when the table is built or written.
 
 ## How it draws
