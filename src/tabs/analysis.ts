@@ -32,6 +32,8 @@ import { tableCsv, tableGeoParquet } from '../segment/featureTableExport.ts';
 import { segBar } from '../ui/steps.ts';
 import type { StudyAreaStep } from './studyArea.ts';
 import { ANCHOR, mapClaim, type Ctx } from './ctx.ts';
+import { toc } from '../layers/toc.ts';
+import { aoiBox } from '../aoi.ts';
 
 export type ToolId = 'areas' | 'objects' | 'table';
 
@@ -176,12 +178,32 @@ export function analysisStep(host: AnalysisHost) {
       map.addSource(id, { type: 'image', url, coordinates });
       map.addLayer({ id, type: 'raster', source: id, layout: { visibility: r.visible ? 'visible' : 'none' }, paint: { 'raster-opacity': r.opacity, 'raster-fade-duration': 0, 'raster-resampling': 'nearest' } }, ANCHOR.fusion);
     }
+    register(r);
   }
 
-  function undraw(r: Result) {
+  /** The result's row in the table of contents (re-registering keeps its place). */
+  function register(r: Result) {
+    const def = toolDef(r.tool);
+    toc().add({
+      id: layerId(r), title: `#${r.id} ${def.name}`, subtitle: `${r.area.name}${r.productLabel ? ` · ${r.productLabel}` : ''}`, family: 'result',
+      kind: r.tool === 'objects' ? 'objects' : r.tool === 'table' ? 'table' : 'classes', mapLayers: [layerId(r)], bounds: aoiBox(r.area.geometry),
+      visible: r.visible, opacity: r.opacity,
+      legend: () => r.tally?.rows.length ? h('ul', { class: 'toc-legend' }, ...r.tally.rows.map(row => h('li', {}, h('span', { class: 'swatch', style: `--c:${row.colour}` }), `${row.label} · ${fmtArea(row.areaM2)}`))) : r.tool === 'table' ? h('p', { class: 'muted small' }, r.range) : null,
+      details: () => host.showResults(),
+      onVisible: (v) => { r.visible = v; paintAreas(); host.render(); },
+      onOpacity: (o) => { r.opacity = o; host.render(); },
+      onRemove: () => discard(r),
+      removeLabel: 'Discard result',
+      removeConfirm: r.downloaded ? undefined : `Discard #${r.id} ${def.name}? It has not been downloaded.`,
+    });
+  }
+
+  /** Take the result's layer off the map; `keepEntry` when it is about to be redrawn in place (Run again). */
+  function undraw(r: Result, keepEntry = false) {
     const id = layerId(r);
     if (map.getLayer(id)) map.removeLayer(id);
     if (map.getSource(id)) map.removeSource(id);
+    if (!keepEntry) toc().forget(id);
   }
 
   function paintAreas() {
@@ -193,7 +215,7 @@ export function analysisStep(host: AnalysisHost) {
 
   function setVisible(r: Result, on: boolean) {
     r.visible = on;
-    if (map.getLayer(layerId(r))) map.setLayoutProperty(layerId(r), 'visibility', on ? 'visible' : 'none');
+    toc().setVisible(layerId(r), on);
     paintAreas();
   }
 
@@ -247,7 +269,7 @@ export function analysisStep(host: AnalysisHost) {
         r = { ...base, tool: 'table', data, cellM: cell, column: again?.tool === 'table' ? again.column : 'chm', range: '', tally: null, ms: performance.now() - t0 };
       }
       if (again) {
-        undraw(again);
+        undraw(again, true);
         results = results.map(x => (x === again ? r : x));
       } else results.push(r);
       draw(r);
@@ -462,7 +484,8 @@ export function analysisStep(host: AnalysisHost) {
       el.append(h('div', { class: 'ramp' }, h('div', { class: 'ramp-bar', style: `background: linear-gradient(to right, ${stops})` })), h('p', { class: 'muted small' }, r.range));
     }
     el.append(h('label', { class: 'row' }, 'Opacity ', h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(r.opacity), class: 'grow', 'aria-label': 'Opacity',
-      oninput: (e: Event) => { r.opacity = +(e.target as HTMLInputElement).value; if (map.getLayer(layerId(r))) map.setPaintProperty(layerId(r), 'raster-opacity', r.opacity); } })));
+      oninput: (e: Event) => toc().applyLayer(layerId(r), +(e.target as HTMLInputElement).value),
+      onchange: (e: Event) => toc().setOpacity(layerId(r), +(e.target as HTMLInputElement).value) })));
     const actions = h('div', { class: 'row' }, h('button', { class: 'chip', onclick: () => host.area.zoomTo(r.area) }, 'Zoom to'));
     if (r.tally) actions.append(h('button', { class: 'chip', onclick: () => void download(r, 'areas') }, 'Class areas CSV'));
     if (r.tool === 'objects') actions.append(h('button', { class: 'chip', onclick: () => void download(r, 'geojson') }, 'Objects GeoJSON'));

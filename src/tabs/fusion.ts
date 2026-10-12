@@ -48,6 +48,7 @@ import { analysisStep } from './analysis.ts';
 import { stepHead } from '../ui/steps.ts';
 import { aoiBox, polygonMask } from '../aoi.ts';
 import { fmtBytes, fmtCount } from '../dom.ts';
+import { toc } from '../layers/toc.ts';
 
 const LAYER = 'fusion';
 const LS_RULES = 'sv.rules', LS_SAMPLES = 'sv.samples', LS_STRATA = 'sv.strata', LS_SOURCES = 'sv.sources';
@@ -171,8 +172,17 @@ export function initFusion(ctx: Ctx) {
     style = keep ? style! : defaultStyle(p);
     try {
       const sources = resolveInputs(p.inputs, items());
-      await updateLayer(map, LAYER, { product: p, sources, style }, ANCHOR.fusion, opacity);
+      const bounds = await updateLayer(map, LAYER, { product: p, sources, style }, ANCHOR.fusion, opacity);
       shown = true;
+      const l0 = lidar(), s0 = scene();
+      toc().add({
+        id: LAYER, title: p.label, subtitle: `Fusion · LiDAR ${l0?.datetime ? fmtDate(l0.datetime) : '—'} · imagery ${s0 ? fmtDate(s0.datetime) : '—'}`, family: 'fusion',
+        kind: p.render === 'classes' ? 'classes' : 'raster', mapLayers: [LAYER], bounds, opacity,
+        legend: () => p.classes?.length ? h('ul', { class: 'toc-legend' }, ...p.classes.slice(0, 40).map(c => h('li', {}, h('span', { class: 'swatch', style: `--c:${c.colour}` }), c.label))) : null,
+        onRemove: () => { hideLayer(map, LAYER); shown = false; panel = null; render(); },
+        onOpacity: (o) => { opacity = o; render(); },
+        details: () => { (document.querySelector('.tab[data-tab="fusion"]') as HTMLElement | null)?.click(); page = 'setup'; render(); },
+      });
       const st = style;
       panel = stretchPanel({ product: p, style: st, stats: () => viewStats(LAYER, ctx.viewBox()), apply: () => restyle(map, LAYER, st) });
       render();
@@ -563,8 +573,10 @@ export function initFusion(ctx: Ctx) {
       legendPanel.append(panel.el);
       if (product.render === 'classes') legendPanel.append(h('button', { class: 'chip', onclick: () => void panel?.refresh() }, 'Recount this view'));
       s3.append(legendPanel);
-      s3.append(h('label', { class: 'row' }, 'Opacity', h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(opacity), oninput: (e: Event) => { opacity = +(e.target as HTMLInputElement).value; if (map.getLayer(LAYER)) map.setPaintProperty(LAYER, 'raster-opacity', opacity); } })),
-        h('button', { class: 'btn ghost small-btn', onclick: () => { hideLayer(map, LAYER); shown = false; panel = null; render(); } }, 'Remove from map'));
+      s3.append(h('label', { class: 'row' }, 'Opacity', h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(opacity),
+        oninput: (e: Event) => toc().applyLayer(LAYER, +(e.target as HTMLInputElement).value),
+        onchange: (e: Event) => toc().setOpacity(LAYER, +(e.target as HTMLInputElement).value) })),
+        h('button', { class: 'btn ghost small-btn', onclick: () => toc().remove(LAYER) }, 'Remove from map'));
     }
     s3.append(renderConiferIndex());
     s3.append(renderSamples());

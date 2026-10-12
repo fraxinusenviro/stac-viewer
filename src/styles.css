@@ -188,3 +188,41 @@ details.panel[open] > summary { margin-bottom: 6px; }
 .step .res-card { margin: 6px 0; }
 .slider3 { display: grid; grid-template-columns: minmax(8em, 42%) 1fr 3.6em; align-items: center; gap: 6px; font-size: 13px; margin: 2px 0; }
 .slider3 output { text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; }
+
+/* ── Table of contents (layers/toc.ts, ui/tocPanel.ts) ── */
+.maplibregl-ctrl.toc { background: var(--bg); color: var(--text); border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.25); width: min(320px, calc(100vw - 80px)); max-height: calc(100% - 24px); display: flex; flex-direction: column; font-size: 13px; overflow: hidden; }
+.maplibregl-ctrl.toc:not(.open) { width: auto; }
+.maplibregl-ctrl-top-left { max-height: 100%; display: flex; flex-direction: column; }
+.toc-head { display: flex; align-items: center; gap: 6px; padding: 2px 4px 2px 2px; }
+.toc-toggle { flex: 1; display: inline-flex; align-items: center; gap: 6px; min-height: 36px; border: 0; background: transparent; color: var(--text); font: inherit; font-weight: 700; cursor: pointer; padding: 0 8px; text-align: left; }
+.toc-n { font-size: 11px; font-weight: 700; min-width: 18px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); text-align: center; }
+.toc-mini { border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--text); font: inherit; font-size: 12px; min-height: 26px; cursor: pointer; }
+.toc-body { overflow-y: auto; border-top: 1px solid var(--line); padding: 4px; display: flex; flex-direction: column; gap: 2px; }
+.toc-empty { margin: 6px; }
+.toc-row { border-radius: 8px; position: relative; background: var(--bg); }
+.toc-row.child { margin-left: 18px; }
+.toc-row.group > .toc-line { background: var(--panel); border-radius: 8px; }
+.toc-row.off .toc-name, .toc-row.off .toc-grip { opacity: 0.5; }
+.toc-row.dragging { z-index: 2; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
+.toc-row.drop-above { box-shadow: inset 0 3px 0 var(--accent); }
+.toc-row.drop-below { box-shadow: inset 0 -3px 0 var(--accent); }
+.toc-line { display: flex; align-items: center; gap: 2px; min-height: 40px; }
+.toc-grip, .toc-eye, .toc-more { flex: none; min-width: 30px; min-height: 36px; border: 0; background: transparent; color: var(--text); cursor: pointer; font-size: 15px; border-radius: 6px; padding: 0; }
+.toc-grip { cursor: grab; touch-action: none; color: var(--muted); font-size: 16px; }
+.toc-grip:active { cursor: grabbing; }
+.toc-grip:focus-visible, .toc-eye:focus-visible, .toc-more:focus-visible, .toc-name:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.toc-name { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; border: 0; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; padding: 2px 4px; }
+.toc-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.toc-glyph { color: var(--muted); }
+.toc-sub { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.toc-menu { display: flex; flex-direction: column; margin: 0 6px 6px 32px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg); }
+.toc-menu button { border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); font: inherit; text-align: left; padding: 8px 10px; cursor: pointer; }
+.toc-menu button:last-child { border-bottom: 0; color: var(--error); }
+.toc-menu button:hover:not(:disabled) { background: var(--panel); }
+.toc-menu button:disabled { opacity: 0.45; cursor: default; }
+.toc-fold { padding: 2px 8px 8px 32px; display: flex; flex-direction: column; gap: 6px; }
+.toc-fold input[type=range] { padding: 0; }
+.toc-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.toc-legend li { display: flex; align-items: center; gap: 6px; }
+.toc-legend .swatch { margin-top: 0; }
+@media (max-width: 760px) { .maplibregl-ctrl.toc { width: min(280px, calc(100vw - 70px)); } }

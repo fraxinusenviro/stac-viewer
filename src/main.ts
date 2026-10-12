@@ -15,6 +15,8 @@ import { initImagery } from './tabs/imagery.ts';
 import { initFusion } from './tabs/fusion.ts';
 import { initObia } from './tabs/obia.ts';
 import { BASE_ANCHOR, initBasemap } from './tabs/basemap.ts';
+import { initToc } from './layers/toc.ts';
+import { TocPanel } from './ui/tocPanel.ts';
 
 const TILE_MIN_ZOOM = 10;
 let projects: Project[] = [];
@@ -58,6 +60,10 @@ const map: MlMap = new maplibregl.Map({
 });
 map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
 map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-right');
+// The table of contents: every output on the map, in draw order, beneath the footprints and overlays.
+map.addControl(new TocPanel(initToc(map, 'anchor-lidar')), 'top-left');
+// For browser tests and the console.
+(globalThis as unknown as { svMap: MlMap }).svMap = map;
 
 const viewBox = (): LonLatBox => {
   const b = map.getBounds();

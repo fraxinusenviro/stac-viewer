@@ -40,8 +40,9 @@ import { fetchExtent, s2AssetScaling } from '../stac.ts';
 import { ORTHO_SERVICES, type XyzService } from '../xyz.ts';
 import { stepHead, segBar } from '../ui/steps.ts';
 import { studyAreaStep } from './studyArea.ts';
-import { addObiaLayers, chmImage, nativeGridLines, objectsImage, pixelOfLonLat, qualityImage, removeImage, rgbImage, setGeoJSON, showImage, type RasterLayer } from './obiaMap.ts';
+import { obiaToc, addObiaLayers, chmImage, nativeGridLines, objectsImage, pixelOfLonLat, qualityImage, removeImage, rgbImage, setGeoJSON, showImage, type RasterLayer } from './obiaMap.ts';
 import { mapClaim, type Ctx } from './ctx.ts';
+import { toc } from '../layers/toc.ts';
 
 type Step = 'area' | 'sources' | 'objects' | 'training' | 'classify' | 'review';
 const STEPS: [Step, string][] = [['area', 'Study area'], ['sources', 'Sources'], ['objects', 'Objects'], ['training', 'Training'], ['classify', 'Classification'], ['review', 'Review & export']];
@@ -104,6 +105,8 @@ export function initObia(ctx: Ctx) {
   const persist = () => save(LS, S);
   let step: Step = 'area';
   const area = studyAreaStep(ctx, () => render(), { prefix: 'obia-aoi', pane: 'pane-obia' });
+  // The Layers panel's switches for the Objects group reach this tab's checkboxes.
+  obiaToc.onVisible = (id, v) => { layerOn[id] = v; if (!pane.hidden) render(); };
 
   // Sources (session; their records are stored in the project when used).
   let rgb: Chosen | null = null, chm: Chosen | null = null;
@@ -751,6 +754,7 @@ export function initObia(ctx: Ctx) {
   }
 
   function render() {
+    if (project) obiaToc.setTitle(`Objects · ${project.recipe.aoi.name}`);
     clear(el);
     if (fixtureLoaded) el.append(h('p', { class: 'note small' }, h('strong', {}, FIXTURE_LABEL), '. Everything below is computed from a synthetic scene for testing; nothing is a real result.'));
     if (note) el.append(h('p', { class: 'muted small' }, note, ' ', h('button', { class: 'chip', onclick: () => { note = ''; render(); } }, 'OK')));
@@ -945,7 +949,7 @@ export function initObia(ctx: Ctx) {
   }
 
   function layerToggles(): HTMLElement {
-    const t = (id: RasterLayer, label: string) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: layerOn[id], onchange: (e: Event) => { layerOn[id] = (e.target as HTMLInputElement).checked; if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', layerOn[id] ? 'visible' : 'none'); } }), label);
+    const t = (id: RasterLayer, label: string) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: layerOn[id], onchange: (e: Event) => { layerOn[id] = (e.target as HTMLInputElement).checked; if (toc().has(id)) toc().setVisible(id, layerOn[id]); } }), label);
     const s2on = !!map.getLayer('obia-s2grid') && map.getLayoutProperty('obia-s2grid', 'visibility') === 'visible';
     return h('div', { class: 'layer-toggles' }, t('obia-rgb', 'RGB'), t('obia-chm', 'CHM'), t('obia-objects', 'Objects'), t('obia-quality', 'Quality mask (red: no imagery, blue: no CHM)'),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: s2on, disabled: !project?.sources.some(s => s.role === 'spectral-context'), onchange: (e: Event) => paintS2Grid((e.target as HTMLInputElement).checked) }), 'Sentinel-2 native 10 m grid'));

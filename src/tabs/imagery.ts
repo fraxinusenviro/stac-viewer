@@ -15,6 +15,7 @@ import { resolveInputs } from '../sources.ts';
 import { searchS2, type S2Item } from '../stac.ts';
 import { stretchPanel, type StretchPanel } from '../ui/stretch.ts';
 import { ANCHOR, shared, type Ctx } from './ctx.ts';
+import { toc } from '../layers/toc.ts';
 
 const LAYER = 's2-scene';
 
@@ -91,7 +92,13 @@ export function initImagery(ctx: Ctx) {
     style = keepStyle ? style! : defaultStyle(p);
     say(`Opening ${fmtDate(scene.datetime)} · ${p.label}…`);
     try {
-      await showLayer(map, LAYER, { product: p, sources: resolveInputs(p.inputs, { s2: scene }, { nodataAuto }), style }, ANCHOR.imagery, opacity, 16);
+      const bounds = await showLayer(map, LAYER, { product: p, sources: resolveInputs(p.inputs, { s2: scene }, { nodataAuto }), style }, ANCHOR.imagery, opacity, 16);
+      toc().add({
+        id: LAYER, title: `Sentinel-2 ${fmtDate(scene.datetime)}`, subtitle: p.label, family: 'imagery', kind: p.render === 'classes' ? 'classes' : 'raster', mapLayers: [LAYER], bounds, opacity,
+        onRemove: () => { scene = null; hideLayer(map, LAYER); panel = null; renderControls(); renderList(); },
+        onOpacity: (o) => { opacity = o; renderControls(); },
+        details: () => (document.querySelector('.tab[data-tab="img"]') as HTMLElement | null)?.click(),
+      });
       const st = style;
       panel = p.identity ? null : stretchPanel({ product: p, style: st, stats: () => viewStats(LAYER, ctx.viewBox()), apply: () => restyle(map, LAYER, st) });
       renderControls();
@@ -130,7 +137,9 @@ export function initImagery(ctx: Ctx) {
         h('select', { onchange: (e: Event) => { nodataAuto = (e.target as HTMLSelectElement).value === 'auto'; void draw(false); } },
           h('option', { value: 'auto', selected: nodataAuto }, 'Auto (0 in any band is transparent)'),
           h('option', { value: 'none', selected: !nodataAuto }, 'None (draw every pixel)'))),
-      h('label', { class: 'row' }, 'Opacity', h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(opacity), oninput: (e: Event) => { opacity = +(e.target as HTMLInputElement).value; if (map.getLayer(LAYER)) map.setPaintProperty(LAYER, 'raster-opacity', opacity); } }))));
+      h('label', { class: 'row' }, 'Opacity', h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(opacity),
+        oninput: (e: Event) => toc().applyLayer(LAYER, +(e.target as HTMLInputElement).value),
+        onchange: (e: Event) => toc().setOpacity(LAYER, +(e.target as HTMLInputElement).value) }))));
   }
 
   shared.events.addEventListener('scenes', renderList);

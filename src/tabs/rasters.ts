@@ -13,6 +13,7 @@ import { coverageTouches, fetchExtent, searchHrdem, type HrdemItem } from '../st
 import { stretchPanel, type StretchPanel } from '../ui/stretch.ts';
 import type { LonLatBox } from '../warp.ts';
 import { ANCHOR, itemName, shared, type Ctx } from './ctx.ts';
+import { toc } from '../layers/toc.ts';
 
 interface RasterLayer { id: string; item: HrdemItem; product: Product; style: ProductStyle; opacity: number; panel: StretchPanel | null }
 
@@ -81,14 +82,16 @@ export function initRasters(ctx: Ctx) {
   function renderLayers() {
     clear(layersEl);
     if (!layers.length) return;
-    layersEl.append(h('h2', {}, 'On the map'));
+    layersEl.append(h('h2', {}, 'On the map'), h('p', { class: 'muted small' }, 'Also listed in the map\'s Layers panel, where the draw order is set.'));
     for (const L of [...layers].reverse()) {
       layersEl.append(h('div', { class: 'card static on-map' },
         h('span', { class: 'card-body' },
           h('span', { class: 'row spread' }, h('strong', { title: L.product.note }, L.product.label), h('button', { class: 'btn ghost small-btn', onclick: () => remove(L) }, 'Remove')),
           h('span', { class: 'muted' }, itemName(L.item)),
           L.panel ? h('details', { open: true }, h('summary', {}, 'Stretch'), L.panel.el, h('button', { class: 'btn ghost small-btn', onclick: () => void L.panel!.seed().then(() => restyle(map, L.id, L.style)) }, 'Fit to view')) : null,
-          h('label', { class: 'row' }, 'Opacity', h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(L.opacity), oninput: (e: Event) => { L.opacity = +(e.target as HTMLInputElement).value; map.setPaintProperty(L.id, 'raster-opacity', L.opacity); } })))));
+          h('label', { class: 'row' }, 'Opacity', h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(L.opacity),
+            oninput: (e: Event) => toc().applyLayer(L.id, +(e.target as HTMLInputElement).value),
+            onchange: (e: Event) => toc().setOpacity(L.id, +(e.target as HTMLInputElement).value) })))));
     }
   }
 
@@ -98,8 +101,13 @@ export function initRasters(ctx: Ctx) {
     say(`Opening ${itemName(it)}…`);
     try {
       const style = defaultStyle(p);
-      await showLayer(map, id, { product: p, sources: resolveInputs(p.inputs, { lidar: it }), style }, ANCHOR.rasters);
+      const bounds = await showLayer(map, id, { product: p, sources: resolveInputs(p.inputs, { lidar: it }), style }, ANCHOR.rasters);
       const L: RasterLayer = { id, item: it, product: p, style, opacity: 1, panel: null };
+      toc().add({
+        id, title: p.label, subtitle: `${itemName(it)} · HRDEM`, family: 'raster', kind: 'raster', mapLayers: [id], bounds,
+        onRemove: () => drop(L), onOpacity: (o) => { L.opacity = o; renderLayers(); },
+        details: () => (document.querySelector('.tab[data-tab="raster"]') as HTMLElement | null)?.click(),
+      });
       if (hasStretch(p) || p.render === 'relief') {
         L.panel = stretchPanel({ product: p, style, stats: () => viewStats(id, ctx.viewBox()), apply: () => restyle(map, id, style) });
         await L.panel.seed();
@@ -112,9 +120,11 @@ export function initRasters(ctx: Ctx) {
     } catch (e) { hideLayer(map, id); say(`Could not open ${itemName(it)}: ${(e as Error).message}`, 'error'); }
   }
 
-  function remove(L: RasterLayer) {
+  /** Remove: through the table of contents, which then calls drop(). */
+  const remove = (L: RasterLayer) => toc().remove(L.id);
+  function drop(L: RasterLayer) {
     hideLayer(map, L.id);
-    layers.splice(layers.indexOf(L), 1);
+    if (layers.includes(L)) layers.splice(layers.indexOf(L), 1);
     renderLayers();
   }
 

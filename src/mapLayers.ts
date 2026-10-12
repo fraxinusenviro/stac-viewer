@@ -3,6 +3,7 @@
 import type { Map as MlMap, RasterTileSource } from 'maplibre-gl';
 import { removeLayer, setLayer, setStyle, tileUrl, type LayerDef } from './engine.ts';
 import type { ProductStyle } from './products.ts';
+import { tocOrNull } from './layers/toc.ts';
 
 const versions = new Map<string, number>();
 
@@ -11,12 +12,15 @@ const versions = new Map<string, number>();
  * already there with the same id. Returns the layer's lon/lat bounds.
  */
 export async function showLayer(map: MlMap, id: string, def: LayerDef, beforeId: string, opacity = 1, maxzoom = 18) {
-  hideLayer(map, id);
+  dropLayer(map, id);
   const bounds = await setLayer(id, def);
   const v = (versions.get(id) ?? 0) + 1;
   versions.set(id, v);
   map.addSource(id, { type: 'raster', tiles: [tileUrl(id, v)], tileSize: 256, bounds, maxzoom });
-  map.addLayer({ id, type: 'raster', source: id, paint: { 'raster-opacity': opacity, 'raster-fade-duration': 0 } }, beforeId);
+  map.addLayer({ id, type: 'raster', source: id, paint: { 'raster-opacity': 1, 'raster-fade-duration': 0 } }, beforeId);
+  map.setPaintProperty(id, 'raster-opacity', opacity);
+  // Re-created under an id the table of contents already lists: it keeps its place and switches.
+  tocOrNull()?.refresh(id);
   return bounds;
 }
 
@@ -28,7 +32,13 @@ export function restyle(map: MlMap, id: string, style: Partial<ProductStyle>) {
   (map.getSource(id) as RasterTileSource | undefined)?.setTiles([tileUrl(id, v)]);
 }
 
+/** Take a layer off the map and out of the table of contents. */
 export function hideLayer(map: MlMap, id: string) {
+  dropLayer(map, id);
+  tocOrNull()?.forget(id);
+}
+
+function dropLayer(map: MlMap, id: string) {
   if (map.getLayer(id)) map.removeLayer(id);
   if (map.getSource(id)) map.removeSource(id);
   removeLayer(id);

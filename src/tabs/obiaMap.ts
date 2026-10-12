@@ -7,10 +7,23 @@
 
 import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import { gridCornersLonLat, gridXY, type AnalysisGrid, type Projector } from '../obia/grid.ts';
+import { toc, tocOrNull } from '../layers/toc.ts';
+import type { TocGroupNode } from '../layers/tocModel.ts';
 
 const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
 export const RASTERS = ['obia-rgb', 'obia-chm', 'obia-quality', 'obia-objects'] as const;
 export type RasterLayer = typeof RASTERS[number];
+
+// The table of contents: the four rasters are one GROUP, "Objects", whose
+// rows the Objects tab's own checkboxes and the Layers panel both switch.
+const GROUP = 'obia';
+const TITLES: Record<RasterLayer, [string, 'raster' | 'objects']> = { 'obia-rgb': ['Photo (RGB)', 'raster'], 'obia-chm': ['Canopy height (CHM)', 'raster'], 'obia-quality': ['Quality mask', 'raster'], 'obia-objects': ['Objects', 'objects'] };
+export const obiaToc = {
+  title: 'Objects',
+  onVisible: null as null | ((id: RasterLayer, visible: boolean) => void),
+  /** Name the group after the study area. */
+  setTitle(title: string) { if (title === this.title) return; this.title = title; tocOrNull()?.rename(GROUP, title); },
+};
 
 export function addObiaLayers(map: MlMap) {
   for (const id of ['obia-footprints', 'obia-s2grid', 'obia-refs']) map.addSource(id, { type: 'geojson', data: EMPTY });
@@ -35,20 +48,41 @@ export function showImage(map: MlMap, id: RasterLayer, img: ImageData | string, 
   const coordinates = gridCornersLonLat(g, proj);
   // Replaced rather than updateImage()d: an update while the previous image is
   // still decoding aborts it with an uncatchable rejection.
-  const op = map.getLayer(id) ? (map.getPaintProperty(id, 'raster-opacity') as number) : opacity;
   if (map.getLayer(id)) map.removeLayer(id);
   if (map.getSource(id)) map.removeSource(id);
   map.addSource(id, { type: 'image', url, coordinates });
-  map.addLayer({ id, type: 'raster', source: id, paint: { 'raster-opacity': op, 'raster-fade-duration': 0, 'raster-resampling': 'nearest' } }, 'obia-s2grid');
-  // Keep the stacking RGB < CHM < quality < objects whatever order they arrive in.
-  for (const r of RASTERS) if (map.getLayer(r)) map.moveLayer(r, 'obia-s2grid');
+  map.addLayer({ id, type: 'raster', source: id, paint: { 'raster-opacity': 1, 'raster-fade-duration': 0, 'raster-resampling': 'nearest' } }, 'obia-s2grid');
   map.setLayoutProperty(id, 'visibility', visible ? 'visible' : 'none');
+  const t = toc();
+  if (!t.has(GROUP)) t.addGroup({ id: GROUP, title: obiaToc.title, family: 'objects', removable: false, details: openTab });
+  const isNew = !t.has(id);
+  const lons = coordinates.map(c => c[0]), lats = coordinates.map(c => c[1]);
+  t.add({
+    id, title: TITLES[id][0], subtitle: 'Objects tab', family: 'objects', kind: TITLES[id][1], mapLayers: [id], parent: GROUP, visible, opacity,
+    bounds: [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)],
+    removable: false, details: openTab, onVisible: (v) => obiaToc.onVisible?.(id, v),
+  });
+  // The tab's own switch wins over the stored one when it was set deliberately (a run with no photo shows the CHM).
+  if (t.get(id)!.visible !== visible) t.setVisible(id, visible);
+  // A new row takes its place in the group: RGB < CHM < quality < objects, objects on top.
+  if (isNew) {
+    const kids = (t.get(GROUP) as TocGroupNode).children;
+    const rank = (k: string) => RASTERS.indexOf(k as RasterLayer);
+    t.moveTo(id, kids.filter(k => k !== id && rank(k) > rank(id)).length);
+  }
   return url;
 }
+
+const openTab = () => (document.querySelector('.tab[data-tab="obia"]') as HTMLElement | null)?.click();
 
 export function removeImage(map: MlMap, id: RasterLayer) {
   if (map.getLayer(id)) map.removeLayer(id);
   if (map.getSource(id)) map.removeSource(id);
+  const t = tocOrNull();
+  if (!t) return;
+  t.forget(id);
+  const g = t.get(GROUP);
+  if (g?.type === 'group' && !g.children.length) t.forget(GROUP);
 }
 
 /** RGB planes (0–255) as an image; NaN transparent. */
