@@ -93,7 +93,7 @@ export interface Recipe {
   segment: SegmentParams;
   referenceScales: typeof REFERENCE_SCALES;
   /** Source ids (SourceAsset.id) per role. */
-  sources: { rgb: string | null; chm: string | null; dtm: string | null; sentinel: string | null };
+  sources: { rgb: string | null; chm: string | null; dtm: string | null; sentinel: string | null; returns?: string | null };
   sourceVersions: Record<string, string>;
   sentinel: SentinelSettings;
   heightBandsM: number[];

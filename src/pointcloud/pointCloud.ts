@@ -17,7 +17,7 @@ import proj4 from 'proj4';
 import { projDef } from '../crs.ts';
 import { controlGrid, gridWindow, interpGrid, type LonLatBox, type OutGrid } from '../warp.ts';
 import { index, loadProjects, projectById, copcUrl } from './catalog.ts';
-import { CHUNK, cellFor, PC_METRICS, type CellGrid, type PcMetric } from './pcMetrics.ts';
+import { CHUNK, PC_CELLS, cellFor, PC_METRICS, type CellGrid, type PcMetric } from './pcMetrics.ts';
 import type { PcRequest, PcResponse } from './pcWorker.ts';
 
 type Metrics = Record<PcMetric, Float32Array> | null;
@@ -162,3 +162,72 @@ export async function samplePointCloud(out: OutGrid, keys: [string, PcMetric][])
   return planes;
 }
 
+
+// ── A whole box, on the tiles' own grid (the Objects tab) ───────────────────
+
+export interface PcBoxResult {
+  /** The tiles' CRS, e.g. `EPSG:2961`, and its code. */
+  crs: string;
+  epsg: number;
+  /** Top-left corner and cell size of the assembled grid; row 0 is the NORTHERN edge. */
+  originX: number;
+  originY: number;
+  cell: number;
+  w: number;
+  h: number;
+  /** One plane per metric (NaN: no value). */
+  values: Record<PcMetric, Float32Array>;
+  /** The acquisitions (catalogue projects) whose tiles were read, and their years. */
+  projects: { id: string; label: string; year: number }[];
+  /** Tiles in other CRSs over the box, left out (one CRS per read). */
+  otherCrsTiles: number;
+  chunks: number;
+}
+
+/**
+ * Every metric over a lon/lat box at the FINEST cell size the chunk budget
+ * allows (2 m where it can), on the chunk lattice in the tiles' own CRS —
+ * never resampled. Null when no indexed tile meets the box. Throws when the
+ * box would need more than `maxChunks` even at 16 m.
+ */
+export async function readPointCloudBox(box: LonLatBox, onProgress?: (msg: string) => void, maxChunks = MAX_CHUNKS): Promise<PcBoxResult | null> {
+  await loadProjects();
+  const { tiles } = await index.search(box);
+  if (!tiles.length) return null;
+  const byCrs = new Map<string, typeof tiles>();
+  for (const t of tiles) { const c = projectById.get(t.project)?.crs ?? ''; (byCrs.get(c) ?? byCrs.set(c, []).get(c)!).push(t); }
+  const [crs, mine] = [...byCrs].sort((a, b) => b[1].length - a[1].length)[0];
+  const epsg = Number(crs.replace(/^EPSG:/, ''));
+  const def = projDef(epsg);
+  if (!def) throw new Error(`the point cloud's CRS ${crs} is not defined here`);
+  const conv = proj4('EPSG:4326', def);
+  const corners = [[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]]].map(q => conv.forward(q) as [number, number]);
+  const X0 = Math.min(...corners.map(q => q[0])), X1 = Math.max(...corners.map(q => q[0])), Y0 = Math.min(...corners.map(q => q[1])), Y1 = Math.max(...corners.map(q => q[1]));
+  let cell = 0, cx0 = 0, cx1 = 0, cy0 = 0, cy1 = 0;
+  for (const c of PC_CELLS) {
+    const size = CHUNK * c;
+    cx0 = Math.floor(X0 / size); cx1 = Math.floor(X1 / size); cy0 = Math.floor(Y0 / size); cy1 = Math.floor(Y1 / size);
+    if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) <= maxChunks) { cell = c; break; }
+  }
+  if (!cell) throw new Error(`the study area needs more than ${maxChunks} point-cloud chunks even at ${PC_CELLS[PC_CELLS.length - 1]} m cells`);
+  const nx = cx1 - cx0 + 1, ny = cy1 - cy0 + 1, total = nx * ny;
+  const w = nx * CHUNK, hh = ny * CHUNK;
+  const values = Object.fromEntries(PC_METRICS.map(m => [m, new Float32Array(w * hh).fill(NaN)])) as Record<PcMetric, Float32Array>;
+  let done = 0;
+  const jobs: Promise<void>[] = [];
+  for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
+    jobs.push(chunk(crs, cell, cx, cy, q => conv.inverse(q) as [number, number]).then(m => {
+      onProgress?.(`Reading the point cloud: ${++done} of ${total} chunks (${cell} m cells)…`);
+      if (!m) return;
+      // Chunk row 0 is its SOUTHERN edge; the assembled grid's row 0 is the northern edge.
+      const ox = (cx - cx0) * CHUNK, oyTop = (cy1 - cy) * CHUNK;
+      for (let r = 0; r < CHUNK; r++) {
+        const dst = (oyTop + (CHUNK - 1 - r)) * w + ox;
+        for (const k of PC_METRICS) values[k].set(m[k].subarray(r * CHUNK, (r + 1) * CHUNK), dst);
+      }
+    }));
+  }
+  await Promise.all(jobs);
+  const projects = [...new Set(mine.map(t => t.project))].map(id => { const p = projectById.get(id); return { id, label: p?.label ?? id, year: p?.year ?? 0 }; });
+  return { crs, epsg, originX: cx0 * CHUNK * cell, originY: (cy1 + 1) * CHUNK * cell, cell, w, h: hh, values, projects, otherCrsTiles: tiles.length - mine.length, chunks: total };
+}

@@ -34,6 +34,10 @@ A six-step workflow — **Study area → Sources → Objects → Training → Cl
   with a separate model per level. A second Sentinel-2 date (leaf-off or autumn), red edge, crown shape from the CHM,
   photo colour composition and an object-level conifer score supply the evidence; what separates well and what does
   not is set out in [docs/OBIA.md](docs/OBIA.md#4a-vegetation-composition-level-2).
+- **LiDAR returns** from the CanElevation point cloud — first-return intensity (a 1064 nm NIR band: broadleaf crowns
+  bright, conifers dark), vegetation-intensity spread, penetration, canopy attenuation and ground-layer intensity —
+  summarized per object at their own 2 m cell support, like Sentinel. Intensity is uncalibrated; mixed acquisitions
+  are flagged.
 - Labels by tapping objects or by importing reference polygons (≥ 80 % coverage by one class) and points; training and
   held-out validation roles; undo/redo.
 - A seeded **Random Forest** with **spatial cross-validation** (blocks, with a buffer against shared Sentinel pixels),

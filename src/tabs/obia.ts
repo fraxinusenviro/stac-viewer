@@ -32,6 +32,9 @@ import { writeGeoTiff } from '../obia/geotiffWrite.ts';
 import { fixtureReferences, fixtureScene, FIXTURE_LABEL } from '../obia/fixture.ts';
 import { S2_BAND_RES, sclInvalid, type NativeRaster } from '../obia/sentinel.ts';
 import type { SentinelInput } from '../obia/pipeline.ts';
+import type { ReturnsInput } from '../obia/returns.ts';
+import { readPointCloudBox } from '../pointcloud/pointCloud.ts';
+import { index as pcIndex, loadProjects as loadPcProjects, projectById as pcProjectById } from '../pointcloud/catalog.ts';
 import type { FeatureGroup, SourceAsset } from '../obia/types.ts';
 import { fetchExtent, s2AssetScaling } from '../stac.ts';
 import { ORTHO_SERVICES, type XyzService } from '../xyz.ts';
@@ -43,12 +46,14 @@ import { mapClaim, type Ctx } from './ctx.ts';
 type Step = 'area' | 'sources' | 'objects' | 'training' | 'classify' | 'review';
 const STEPS: [Step, string][] = [['area', 'Study area'], ['sources', 'Sources'], ['objects', 'Objects'], ['training', 'Training'], ['classify', 'Classification'], ['review', 'Review & export']];
 const LS = 'sv.obia.settings';
-const GROUPS: [FeatureGroup, string][] = [['rgb', 'RGB colour & texture'], ['structure', 'LiDAR structure (CHM)'], ['terrain', 'Terrain'], ['geometry', 'Object geometry'], ['sentinel', 'Sentinel-2 (native support)'], ['index', 'Conifer score (derived from Sentinel, photo and CHM)']];
+const GROUPS: [FeatureGroup, string][] = [['rgb', 'RGB colour & texture'], ['structure', 'LiDAR structure (CHM)'], ['terrain', 'Terrain'], ['geometry', 'Object geometry'], ['sentinel', 'Sentinel-2 (native support)'], ['returns', 'LiDAR returns (point cloud: intensity, penetration, attenuation)'], ['index', 'Conifer score (derived from Sentinel, photo, CHM and returns)']];
 
 interface Settings {
   presetId: string; datum: Datum; cellM: number; bufferM: number; segment: SegmentParams; heightBandsM: number[];
   s2: { from: string; to: string; maxCloud: number }; s2b: { from: string; to: string; maxCloud: number }; groups: FeatureGroup[]; blockM: number; folds: number; trees: number;
   refThreshold: number; pointsRepresent: boolean;
+  /** Read LiDAR return metrics from the point cloud on a full run. */
+  pc: boolean; pcGroupAdded?: boolean;
 }
 
 /** A chosen source: its contract record, how to read it, where it is. */
@@ -92,8 +97,10 @@ export function initObia(ctx: Ctx) {
     presetId: preset0.id, datum: 'wgs84', cellM: preset0.cellM, bufferM: 20, segment: { ...preset0.segment }, heightBandsM: [0.5, 2, 8],
     s2: { from: `${new Date().getFullYear() - 1}-06-01`, to: `${new Date().getFullYear() - 1}-09-30`, maxCloud: 20 },
     s2b: { from: `${new Date().getFullYear() - 1}-04-20`, to: `${new Date().getFullYear() - 1}-05-20`, maxCloud: 20 },
-    groups: ['rgb', 'structure', 'terrain', 'geometry', 'sentinel', 'index'], blockM: 100, folds: 5, trees: 100, refThreshold: 0.8, pointsRepresent: false,
+    groups: ['rgb', 'structure', 'terrain', 'geometry', 'sentinel', 'returns', 'index'], blockM: 100, folds: 5, trees: 100, refThreshold: 0.8, pointsRepresent: false, pc: true, pcGroupAdded: true,
   });
+  // Settings stored before the point cloud joined: its predictor group is switched on once.
+  if (!S.pcGroupAdded) { S = { ...S, pcGroupAdded: true, pc: S.pc ?? true, groups: S.groups.includes('returns') ? S.groups : [...S.groups, 'returns'] }; }
   const persist = () => save(LS, S);
   let step: Step = 'area';
   const area = studyAreaStep(ctx, () => render(), { prefix: 'obia-aoi', pane: 'pane-obia' });
@@ -109,6 +116,8 @@ export function initObia(ctx: Ctx) {
   let lidarItems: NormalizedItem[] = [];
   let nsodbAck = false, nsodbId = 'nsodb10k';
   let searching = '';
+  /** Point-cloud coverage of the study area (from the tile index), checked once per area. */
+  let pcCover: { aoiId: string; tiles: number; projects: string[]; crs: string[]; error?: string } | null = null;
 
   // Project and interaction state.
   let project: ObiaProject | null = null;
@@ -418,7 +427,7 @@ export function initObia(ctx: Ctx) {
     return {
       algorithm: OBIA_ALGORITHM_VERSION, aoi: { id: aoi.id, name: aoi.name, geometry: aoi.geometry }, objective: S.presetId, epsg, cellM: S.cellM, bufferM: S.bufferM,
       segment: S.segment, referenceScales: REFERENCE_SCALES,
-      sources: { rgb: rgb?.asset.id ?? null, chm: chm?.asset.id ?? null, dtm: chm?.inputs['lidar:dtm'] ? chm.asset.id : null, sentinel: s2 ? `earth-search/${s2.collectionId}/${s2.itemId}` : null },
+      sources: { rgb: rgb?.asset.id ?? null, chm: chm?.asset.id ?? null, dtm: chm?.inputs['lidar:dtm'] ? chm.asset.id : null, sentinel: s2 ? `earth-search/${s2.collectionId}/${s2.itemId}` : null, returns: S.pc && pcCover?.tiles ? 'canelevation-copc' : null },
       sourceVersions: sv, sentinel: { itemId: s2?.itemId ?? null, secondItemId: slots.b.item?.itemId ?? null, ...DEFAULT_SENTINEL }, heightBandsM: S.heightBandsM,
     };
   }
@@ -493,6 +502,36 @@ export function initObia(ctx: Ctx) {
     return { sourceId: `earth-search/${s2.collectionId}/${s2.itemId}`, rasters: [...groups.values()], bands: DEFAULT_SENTINEL.bands, indices: DEFAULT_SENTINEL.indices, sclInvalid: DEFAULT_SENTINEL.sclInvalid, maskBufferPx: DEFAULT_SENTINEL.maskBufferPx };
   }
 
+  async function checkPointCloud(aoi: Aoi) {
+    if (pcCover?.aoiId === aoi.id) return;
+    pcCover = { aoiId: aoi.id, tiles: -1, projects: [], crs: [] };
+    try {
+      await loadPcProjects();
+      const { tiles } = await pcIndex.search(aoiBox(aoi.geometry));
+      const ps = [...new Set(tiles.map(t => t.project))];
+      pcCover = { aoiId: aoi.id, tiles: tiles.length, projects: ps.map(id => { const p = pcProjectById.get(id); return p ? `${p.label} (${p.year})` : id; }), crs: [...new Set(ps.map(id => pcProjectById.get(id)?.crs ?? '?'))] };
+    } catch (e) { pcCover = { aoiId: aoi.id, tiles: 0, projects: [], crs: [], error: (e as Error).message }; }
+    render();
+  }
+
+  /** The point cloud's return metrics over the study area (plus the buffer), on its own cell grid. */
+  async function readReturns(aoi: Aoi, stage: (s: string) => void): Promise<{ input: ReturnsInput; asset: SourceAsset; cell: number } | null> {
+    const box = aoiBox(aoi.geometry), pad = S.bufferM / 111000 + 0.0002;
+    const r = await readPointCloudBox([box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad], stage);
+    if (!r) return null;
+    const raster: NativeRaster = { key: `copc:${r.crs}:${r.cell}m`, epsg: r.epsg, originX: r.originX, originY: r.originY, res: r.cell, w: r.w, h: r.h, values: r.values as unknown as Record<string, Float32Array> };
+    const sourceId = `canelevation-copc/${r.projects.map(p => p.id).join('+')}`;
+    const asset: SourceAsset = {
+      id: sourceId, role: 'lidar-points', label: `LiDAR point cloud returns: ${r.projects.map(p => `${p.label} ${p.year}`).join(', ')}`, collectionId: 'canelevation-copc',
+      uriReference: 'NRCan CanElevation COPC tiles (static tile index)', nativeResolutionM: [r.cell, r.cell], access: 'analytical',
+      accessNote: `First returns reduced to ${r.cell} m cells on the tiles' own lattice (${r.crs}), ${r.chunks} chunk${r.chunks === 1 ? '' : 's'}; intensity uncalibrated${r.projects.length > 1 ? ' and from more than one acquisition' : ''}.${r.otherCrsTiles ? ` ${r.otherCrsTiles} tiles in another CRS were left out.` : ''}`,
+      grid: { crs: r.crs, transform: [r.originX, r.cell, 0, r.originY, 0, -r.cell], width: r.w, height: r.h, pixelConvention: 'area' },
+      acquiredStart: r.projects.length ? `${Math.min(...r.projects.map(p => p.year))}` : undefined, acquiredEnd: r.projects.length ? `${Math.max(...r.projects.map(p => p.year))}` : undefined,
+      attribution: 'NRCan CanElevation (Open Government Licence – Canada)',
+    };
+    return { input: { sourceId, raster, acquisitions: r.projects.map(p => p.id) }, asset, cell: r.cell };
+  }
+
   async function runObjects(kind: 'preview' | 'full') {
     const where = area.current();
     if (!where.aoi) { say(where.reason, 'error'); return; }
@@ -551,11 +590,21 @@ export function initObia(ctx: Ctx) {
       const sentinelB = kind === 'full' && sentinel ? await readSentinel(aoi, slots.b.item, 'the second date', stage) : null;
       if (cancelled) throw new Error('cancelled');
       const tS2 = performance.now() - t0 - tRead;
+      let returns: Awaited<ReturnType<typeof readReturns>> = null, returnsNote = '';
+      if (kind === 'full' && S.pc) {
+        stage('Reading the point cloud…');
+        try {
+          returns = await readReturns(aoi, stage);
+          if (!returns) returnsNote = 'no indexed point-cloud tile meets the study area';
+        } catch (e) { returnsNote = `the point cloud could not be read: ${(e as Error).message}`; }
+      }
+      if (cancelled) throw new Error('cancelled');
+      const tPc = performance.now() - t0 - tRead - tS2;
       stage('Segmenting in the worker…');
       const run = runObjectsJob({
         grid: { w: grid.width, h: grid.height, x0: grid.transform[0], y0: grid.transform[3], cellM: S.cellM, epsg: plan.epsg },
         planes, mask, params: S.segment, windowEdge: kind === 'preview', heightBandsM: S.heightBandsM, segmentationVersion: segVersion,
-        sources: { rgb: rgb?.asset.id ?? null, chm: chm?.asset.id ?? null, dtm: recipe.sources.dtm }, sentinel, sentinelB,
+        sources: { rgb: rgb?.asset.id ?? null, chm: chm?.asset.id ?? null, dtm: recipe.sources.dtm }, sentinel, sentinelB, returns: returns?.input ?? null,
       }, s => stage(`Worker: ${s}…`));
       job.run = run as Running<unknown>;
       const r = await run.promise;
@@ -581,6 +630,7 @@ export function initObia(ctx: Ctx) {
         };
         if (slots.a.item && sentinel) sources.push(sceneAsset(slots.a.item, sentinel, slots.a.probe, 'main date'));
         if (slots.b.item && sentinelB) sources.push(sceneAsset(slots.b.item, sentinelB, slots.b.probe, 'second date'));
+        if (returns) sources.push(returns.asset);
         const prev = project;
         const keepClasses = prev?.classes ?? DEFAULT_CLASSES.map(c => ({ ...c }));
         const at = new Date().toISOString();
@@ -590,7 +640,7 @@ export function initObia(ctx: Ctx) {
           classes: keepClasses, labelEntries: [], references: prev?.references ?? [], model: null, classification: null, coniferScore: r.coniferScore,
           measured: {
             areaHa: aoiAreaM2(aoi.geometry) / 1e4, gridPx: grid.width * grid.height, objects: r.count, estimatedMiB: Math.round(est.bytes / 1024 ** 2), budgetMiB: Math.round(est.budget / 1024 ** 2),
-            readFineMs: Math.round(tRead), readSentinelMs: Math.round(tS2), ...Object.fromEntries(Object.entries(r.stageMs).map(([k, v]) => [`${k}Ms`, Math.round(v)])),
+            readFineMs: Math.round(tRead), readSentinelMs: Math.round(tS2), readPointCloudMs: Math.round(tPc), returns: returns ? `${returns.cell} m cells, ${returns.input.acquisitions.length} acquisition${returns.input.acquisitions.length === 1 ? '' : 's'}${r.returnsExact === false ? ', approximate intersection' : ''}` : S.pc ? `not used: ${returnsNote}` : 'switched off', ...Object.fromEntries(Object.entries(r.stageMs).map(([k, v]) => [`${k}Ms`, Math.round(v)])),
             totalMs: Math.round(performance.now() - t0), sentinelIntersection: r.sentinelExact === null ? 'no Sentinel' : r.sentinelExact ? 'exact' : 'approximate (fine grid)',
             userAgent: navigator.userAgent,
           },
@@ -612,11 +662,16 @@ export function initObia(ctx: Ctx) {
         reapplyReferences(false);
         // How much of each date reached the objects, stated rather than left in the support tables.
         const validShare = (key: string) => { const xs = r.objects.filter(o => o.support[key]); return xs.length ? xs.filter(o => o.support[key].validFraction > 0).length / xs.length : null; };
-        const vA = validShare('sentinel_10m'), vB = validShare('sentinel_b_10m');
-        project.measured = { ...project.measured, ...(vA !== null ? { s2ValidObjects: vA } : {}), ...(vB !== null ? { s2bValidObjects: vB } : {}) };
+        const vA = validShare('sentinel_10m'), vB = validShare('sentinel_b_10m'), vR = returns ? validShare(`returns_${returns.cell}m`) : null;
+        project.measured = { ...project.measured, ...(vA !== null ? { s2ValidObjects: vA } : {}), ...(vB !== null ? { s2bValidObjects: vB } : {}), ...(vR !== null ? { returnsValidObjects: vR } : {}) };
         await checkpoint();
         const thin = [vA !== null && vA < 0.5 ? `the main date has valid pixels for only ${pct(vA)} of objects` : '', vB !== null && vB < 0.5 ? `the second date has valid pixels for only ${pct(vB)} of objects` : ''].filter(Boolean);
-        if (thin.length) say(`Objects done, but ${thin.join(' and ')} (cloud, cirrus or shadow in the scene classification). Those features are missing, not zero; choose a clearer scene in Sources.`, 'error');
+        const warn: string[] = [];
+        if (thin.length) warn.push(`${thin.join(' and ')} (cloud, cirrus or shadow in the scene classification): those features are missing, not zero — choose a clearer scene in Sources`);
+        if (returnsNote) warn.push(`LiDAR returns were not added (${returnsNote})`);
+        if (returns && returns.input.acquisitions.length > 1) warn.push('the point cloud spans more than one acquisition, so its uncalibrated intensity is not comparable across the area (flagged on every object)');
+        const done = `${r.count.toLocaleString()} objects over ${fmtArea(aoiAreaM2(aoi.geometry))} at ${S.cellM} m in ${(project.measured.totalMs as number / 1000).toFixed(1)} s.`;
+        if (warn.length) say(`${done} Note: ${warn.join('; ')}.`, 'error');
         else say(`${r.count.toLocaleString()} objects over ${fmtArea(aoiAreaM2(aoi.geometry))} at ${S.cellM} m in ${(project.measured.totalMs as number / 1000).toFixed(1)} s.${carried.some(c => c.pending) ? ` ${carried.filter(c => c.pending).length} earlier labels carried over by location, held for confirmation in Training.` : ''}`);
       }
       paintObjects();
@@ -830,6 +885,18 @@ export function initObia(ctx: Ctx) {
     };
     body.append(sceneCard('a', '3 · Spectral context: main date (Sentinel-2, optional)', S.s2, 'Leaf-on (June–September). Read at native support — B02–B04, B08 at 10 m; B05–B07, B8A, B11, SCL at 20 m — never resampled onto the fine grid. Cloud, shadow, cirrus and snow masked from the SCL with a one-pixel buffer. RGB + LiDAR alone is a complete workflow.'));
     body.append(sceneCard('b', '4 · Second date (optional): leaf-off or senescence', S.s2b, 'The single strongest evidence for vegetation TYPE: broadleaf trees and shrubs lose their greenness leaf-off (late April–mid May, before leaf-out, after snow-melt) while conifers keep it; in autumn graminoids turn straw-coloured and ericaceous shrubs red. Adds second-date bands and Δ (main − second) differences per object.'));
+    // The point cloud: return metrics (intensity above all) as object attributes.
+    if (pcCover?.aoiId !== aoi.id) void checkPointCloud(aoi);
+    const pcState = !pcCover || pcCover.aoiId !== aoi.id || pcCover.tiles < 0 ? 'Checking the point-cloud tile index…'
+      : pcCover.error ? `The tile index could not be read: ${pcCover.error}`
+      : pcCover.tiles ? `${pcCover.tiles} COPC tile${pcCover.tiles === 1 ? '' : 's'} meet the study area: ${pcCover.projects.join(', ')} (${pcCover.crs.join(', ')}).`
+      : 'No indexed point-cloud tile meets the study area (the index covers the Halifax County 2018 acquisitions).';
+    body.append(h('div', { class: 'res-card' },
+      h('div', { class: 'row res-head' }, h('strong', { class: 'grow' }, '5 · LiDAR returns (point cloud, optional)'), h('span', { class: `badge${S.pc && pcCover?.tiles ? ' ok' : ''}` }, S.pc ? (pcCover?.tiles ? 'on' : 'no coverage') : 'off')),
+      h('p', { class: 'muted small' }, 'The laser\'s own measurements, which the HRDEM height rasters throw away: first-return INTENSITY (the laser is near-infrared, 1064 nm — broadleaf crowns return more than needles; Sphagnum and wet peat little, lichen much), the share of pulses reaching the ground, and canopy attenuation. Reduced to 2 m cells on the tiles\' own grid (coarser for a large area), then summarized per object at that support like Sentinel-2. Read on a full run only; never a segmentation input.'),
+      h('p', { class: pcCover?.tiles === 0 || pcCover?.error ? 'note small' : 'small' }, pcState),
+      pcCover && pcCover.projects.length > 1 ? h('p', { class: 'note small' }, 'More than one acquisition: intensity is uncalibrated, so it is not comparable between them. Objects will be flagged.') : null,
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: S.pc, onchange: (e: Event) => { S = { ...S, pc: (e.target as HTMLInputElement).checked }; persist(); render(); } }), 'Read LiDAR returns on the full run')));
     body.append(h('div', { class: 'row' }, h('button', { class: 'btn', disabled: !rgb && !chm, onclick: () => setStep('objects') }, 'Next: Objects')));
   }
 
@@ -868,7 +935,8 @@ export function initObia(ctx: Ctx) {
       const m = project.measured;
       body.append(h('p', { class: 'small' }, `${project.count.toLocaleString()} objects · segmentation ${project.segmentationVersion} · ${project.grid.width} × ${project.grid.height} cells · read ${fmt((m.readFineMs as number) / 1000, 1)} s + Sentinel ${fmt((m.readSentinelMs as number) / 1000, 1)} s · segment ${fmt((m.segmentationMs as number) / 1000, 1)} s · features ${fmt((m.featuresMs as number) / 1000, 1)} s · Sentinel stats ${fmt(((m.sentinelMs as number) ?? 0) / 1000, 1)} s (${m.sentinelIntersection}).`));
       const vs = (k: string, label: string) => (typeof m[k] === 'number' ? `${label} valid for ${pct(m[k] as number)} of objects` : '');
-      const val = [vs('s2ValidObjects', 'Sentinel main date'), vs('s2bValidObjects', 'second date')].filter(Boolean);
+      const val = [vs('s2ValidObjects', 'Sentinel main date'), vs('s2bValidObjects', 'second date'), vs('returnsValidObjects', 'LiDAR returns')].filter(Boolean);
+      if (m.returns) body.append(h('p', { class: 'muted small' }, `LiDAR returns: ${m.returns}${typeof m.readPointCloudMs === 'number' ? ` · read ${fmt((m.readPointCloudMs as number) / 1000, 1)} s` : ''}.`));
       if (val.length) body.append(h('p', { class: val.some(t => /valid for ([0-4]?\d) %/.test(t)) ? 'note small' : 'muted small' }, `${val.join('; ')}.`));
       const small = project.objects.filter(o => o.flags.includes('below-min-patch')).length;
       if (small) body.append(h('p', { class: 'muted small' }, `${small} objects are below the minimum patch area and kept because they differ from every neighbour (flagged).`));
@@ -1154,18 +1222,18 @@ export function initObia(ctx: Ctx) {
     const dispRgb = showImage(map, 'obia-rgb', rgbImage(f.planes.r, f.planes.g, f.planes.b, f.w, f.h), grid, p, 1, true);
     const dispChm = showImage(map, 'obia-chm', chmImage(f.planes.chm, f.w, f.h), grid, p, 0.9, layerOn['obia-chm']);
     const t0 = performance.now();
-    const run = runObjectsJob({ grid: { w: f.w, h: f.h, x0: f.x0, y0: f.y0, cellM: 1, epsg: f.epsg }, planes: f.planes, mask: f.mask, params: { ...f.params, mergeSimilarity: 0 }, windowEdge: false, heightBandsM: S.heightBandsM, segmentationVersion: 'fixture-v1', sources: { rgb: 'fixture:rgb', chm: 'fixture:chm', dtm: null }, sentinel: f.sentinel, sentinelB: f.sentinelB }, () => {});
+    const run = runObjectsJob({ grid: { w: f.w, h: f.h, x0: f.x0, y0: f.y0, cellM: 1, epsg: f.epsg }, planes: f.planes, mask: f.mask, params: { ...f.params, mergeSimilarity: 0 }, windowEdge: false, heightBandsM: S.heightBandsM, segmentationVersion: 'fixture-v1', sources: { rgb: 'fixture:rgb', chm: 'fixture:chm', dtm: null }, sentinel: f.sentinel, sentinelB: f.sentinelB, returns: f.returns }, () => {});
     job = { label: 'Fixture', stage: 'Segmenting the synthetic scene…', run: run as Running<unknown>, t0 };
     render();
     try {
       const r = await run.promise;
-      const recipe: Recipe = { algorithm: OBIA_ALGORITHM_VERSION, aoi: { id: aoi.id, name: aoi.name, geometry: aoi.geometry }, objective: 'fine-patches', epsg: f.epsg, cellM: 1, bufferM: 0, segment: f.params, referenceScales: REFERENCE_SCALES, sources: { rgb: 'fixture:rgb', chm: 'fixture:chm', dtm: null, sentinel: 'fixture:sentinel-2' }, sourceVersions: {}, sentinel: { itemId: 'fixture', ...DEFAULT_SENTINEL }, heightBandsM: S.heightBandsM };
+      const recipe: Recipe = { algorithm: OBIA_ALGORITHM_VERSION, aoi: { id: aoi.id, name: aoi.name, geometry: aoi.geometry }, objective: 'fine-patches', epsg: f.epsg, cellM: 1, bufferM: 0, segment: f.params, referenceScales: REFERENCE_SCALES, sources: { rgb: 'fixture:rgb', chm: 'fixture:chm', dtm: null, sentinel: 'fixture:sentinel-2', returns: 'fixture:point-cloud' }, sourceVersions: {}, sentinel: { itemId: 'fixture', ...DEFAULT_SENTINEL }, heightBandsM: S.heightBandsM };
       const at = new Date().toISOString();
       const fx = (id: string, role: SourceAsset['role'], label: string, res: number): SourceAsset => ({ id, role, label: `${label} — ${FIXTURE_LABEL}`, uriReference: 'fixture', nativeResolutionM: [res, res], access: 'analytical', accessNote: FIXTURE_LABEL });
       const s2grid = f.sentinel.rasters[0];
       project = {
         schema: PROJECT_SCHEMA, created: at, updated: at, recipe, recipeHash: recipeHash(recipe), segmentationVersion: 'fixture-v1',
-        sources: [fx('fixture:rgb', 'boundary-imagery', 'RGB', 1), fx('fixture:chm', 'lidar-feature', 'CHM', 1), { ...fx('fixture:sentinel-2', 'spectral-context', 'Sentinel-2', 10), grid: { crs: `EPSG:${f.epsg}`, transform: [s2grid.originX, 10, 0, s2grid.originY, 0, -10], width: s2grid.w, height: s2grid.h, pixelConvention: 'area' } }, fx('fixture:sentinel-2-leaf-off', 'spectral-context', 'Sentinel-2 second date', 10)],
+        sources: [fx('fixture:rgb', 'boundary-imagery', 'RGB', 1), fx('fixture:chm', 'lidar-feature', 'CHM', 1), { ...fx('fixture:sentinel-2', 'spectral-context', 'Sentinel-2', 10), grid: { crs: `EPSG:${f.epsg}`, transform: [s2grid.originX, 10, 0, s2grid.originY, 0, -10], width: s2grid.w, height: s2grid.h, pixelConvention: 'area' } }, fx('fixture:sentinel-2-leaf-off', 'spectral-context', 'Sentinel-2 second date', 10), fx('fixture:point-cloud', 'lidar-points', 'Point-cloud returns', 2)],
         grid, crsDefinition: p.def, labels: r.labels, count: r.count, objects: r.objects, featureDefs: r.featureDefs, coarsePixels: r.coarsePixels,
         classes: DEFAULT_CLASSES.map(c => ({ ...c })), coniferScore: r.coniferScore,
         labelEntries: [], references: fixtureReferences().features.map((ft, i) => ({ id: `fixture#${i}`, kind: 'polygon', classId: String(ft.properties!.class), role: 'training', geometry: ft.geometry as GeoJSON.Polygon, file: 'fixture', properties: ft.properties ?? {} })),

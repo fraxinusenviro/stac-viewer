@@ -26,7 +26,7 @@ Worker with progress and **Cancel**; the map stays usable throughout.
 
 | Spec invariant | Where |
 |---|---|
-| 1. Sentinel never segments | `obia/segment.ts` takes RGB, CHM and DTM planes only; `obia/pipeline.ts` calls it before looking at Sentinel. Test: *ACCEPTANCE 2* (`test/obiaCore.test.ts`) changes every Sentinel value ×3, and removes Sentinel entirely: labels identical. |
+| 1. Sentinel never segments | `obia/segment.ts` takes RGB, CHM and DTM planes only; `obia/pipeline.ts` calls it before looking at Sentinel or the point-cloud returns. Test: *ACCEPTANCE 2* (`test/obiaCore.test.ts`) changes every Sentinel value ×3, and removes Sentinel entirely: labels identical. |
 | 2. Fine boundaries from RGB and LiDAR | `segmentationChannels`: L\*a\*b\* (converted from the three colour channels only), CHM, optional slope. |
 | 3. Native support kept | `obia/sentinel.ts` reads each band at overview level 0 on its own grid (`engine.readNative`, refused rather than shrunk past 4 M pixels); `FeatureDefinition.effectiveSupportM` 10 or 20 m, `sampling: native-area-weighted`; survives export and reload (*ACCEPTANCE 1/4*). |
 | 4. No upsampling described as measurement | No Sentinel plane exists on the fine grid in this tab. The Fusion tab's "sharpened" variables are not used here. |
@@ -131,8 +131,34 @@ The ablation's "without Sentinel" set also drops the conifer score, which Sentin
 6. **Conifer / broadleaf seedlings under 0.5 m** — rarely separable from the ground layer at 1 m. The classes exist so
    that what is seen in the field can be recorded; do not expect the model to find them.
 
-Point-cloud intensity and penetration (the strongest structural evidence for leaf type in FieldMapper's index) are not
-yet read in this tab (Milestone B).
+### LiDAR returns (point cloud)
+
+An optional fifth source (Sources ▸ 5): the NRCan CanElevation COPC tiles over the study area, read in the
+point-cloud worker and reduced to **first-return metric cells on the tiles' own lattice and CRS** — 2 m wherever the
+area fits in 64 chunks (≈ 4 km²), else 4, 8 or 16 m (`pointcloud/pointCloud.readPointCloudBox`). Each object is then
+sampled against those cells exactly as against Sentinel-2's native pixels (`obia/returns.ts`: area-weighted means over
+valid cells, valid fraction, cell counts, `returns-*` flags); the cells are never resampled onto the analysis grid,
+and the returns play no part in segmentation (*test/obiaReturns.test.ts* checks the labels are identical with and
+without them).
+
+| Feature | Definition (first returns, heights above a ground surface built from class 2/9 returns) | Separates |
+|---|---|---|
+| `pc_ivg` | mean intensity of returns on vegetation > 0.5 m — a 1064 nm NIR band of the crowns | broadleaf (bright) vs conifer (dark) — the strongest point-cloud evidence for leaf type |
+| `pc_ivg_sd` | spread of the per-cell vegetation intensity over the object | crown heterogeneity; mixed stands |
+| `pc_att` | Beer–Lambert canopy attenuation per metre, under ≥ 2 m of canopy | needle-leaved crowns stop more pulses per metre |
+| `pc_pen` | share of first returns reaching the ground layer | openness: open heath and meadow vs closed canopy |
+| `pc_igr` | mean intensity of returns at the ground layer | wet surfaces, *Sphagnum* and dark peat return little; lichen, dry litter and mineral soil much |
+| `pc_int` | mean intensity of all first returns | a general surface brightness at 1064 nm |
+| `pc_den` | first returns per m² | a property of the survey (flight-line overlap): recorded as support, **not** a predictor |
+
+The conifer score gains two terms: − `pc_ivg` (weight 0.25) and + `pc_att` (0.15).
+
+**Intensity is uncalibrated** — gain, range and sensor set it — so it is comparable only within one acquisition. Tiles
+are read in one CRS (the commonest over the area); when they come from more than one acquisition every object is
+flagged `returns-multiple-acquisitions`, the run says so, and the model's figures describe that mixture. The octree is read to ~16 returns per cell, a stratified thinning (§9). Measured on a
+Halifax test block (8.85 ha, 869 objects): 10.4 s to read the Halifax County Coastal and Inland 2018 tiles at 2 m,
+returns valid for every object. Cells need ≥ 4 returns of a kind before an intensity or ratio is reported; an
+object with none is missing, not zero.
 
 ## 5. Exports
 
@@ -178,19 +204,21 @@ fallback, range probe) · `obiaExport` (GeoTIFF read-back, RLE, bundle round tri
 Sentinel support after reload) · `obiaBudget`.
 
 `obiaComposition` (crown-shape and colour features, seasonal differences and their support, the conifer score, the
-class tree, two-level classification on the fixture).
+class tree, two-level classification on the fixture), `obiaReturns` (LiDAR returns at native cell support, the area-weighted spread, mixed-acquisition flags, cross-CRS intersection, segmentation unchanged).
 
 Acceptance criteria covered by tests: 1, 2, 3, 4, 5, 6, 9 (reload; split/merge is not built), 10, 11, 12 (partly:
 inaccessible URLs, servers ignoring ranges, authentication refusals, zero valid observations; the refusal of a
 non-8-bit RGB and of an unknown CRS is code-reviewed, not tested), 14 (GeoTIFFs read back with geotiff.js
 only — no GDAL here). Verified in the browser: 13 (cancel, progress, responsive map, refusal before allocation,
-reload recovery) and 15 (§6). Not applicable yet: 7 (no tiling: the bounded domain is enforced), 8 (no point-cloud
-metrics in this tab).
+reload recovery) and 15 (§6). Not applicable yet: 7 (no tiling: the bounded domain is enforced). 8 (point-cloud metrics): returns at their own
+cell support, `obiaReturns`.
 
 ## 9. Not built (Milestones B and C)
 
-- Point-cloud (COPC) metrics in this tab. The Fusion tab's point-cloud reader reads octree levels to the depth a cell
-  size needs — a spatially thinned sample — so it is not used analytically here.
+- Full-density point-cloud reads. The returns are read through the shared reader, which descends the COPC octree
+  only as deep as ~16 returns per cell needs: a spatially stratified THINNING, so means and ratios are unbiased but
+  noisier than the full cloud would give; percentile heights, return-number profiles and per-crown point metrics are
+  not built.
 - Seasonal Sentinel composites (several dates, medians, observation counts); parent / neighbourhood context.
 - Split / merge editing with lineage; a reviewed correction can be included in training explicitly, but geometry is
   not editable.

@@ -11,6 +11,7 @@ import { projector } from './grid.ts';
 import { fineFeatureDefs, fineFeatures } from './features.ts';
 import { segment, segmentationChannels, type FinePlanes } from './segment.ts';
 import { areaWeighted, fineToNative, normalizedDifference, sclInvalid, seasonalDeltaDefs, sentinelFeatureDefs, SEASONAL_DELTAS, S2_INDICES, type NativeRaster } from './sentinel.ts';
+import { returnsStats, type ReturnsInput } from './returns.ts';
 import { coniferScoreDef, scoreConifer, type ScoreReport } from './composition.ts';
 import type { SegmentParams } from './recipe.ts';
 import type { FeatureDefinition, ObjectRecord } from './types.ts';
@@ -40,6 +41,8 @@ export interface ObjectsJob {
   sentinel?: SentinelInput | null;
   /** An optional second date of the same kind (leaf-off or senescence), features prefixed `s2b_`. */
   sentinelB?: SentinelInput | null;
+  /** LiDAR return metrics (intensity, penetration, attenuation) on the point cloud's own cell grid. */
+  returns?: ReturnsInput | null;
 }
 
 export interface ObjectsResult {
@@ -51,6 +54,8 @@ export interface ObjectsResult {
   /** Per object, the ids of the COARSEST native pixels it touches (for leakage-safe folds). */
   coarsePixels: Int32Array[] | null;
   sentinelExact: boolean | null;
+  /** null without a point cloud. */
+  returnsExact: boolean | null;
   coniferScore: ScoreReport;
   stageMs: Record<string, number>;
 }
@@ -93,10 +98,20 @@ export function runObjects(job: ObjectsJob, progress: (stage: string) => void = 
     }
     lap('sentinel');
   }
+  let returnsExact: boolean | null = null;
+  if (job.returns) {
+    progress('LiDAR returns at native support');
+    const r = job.returns.raster;
+    const toNative = g.epsg === r.epsg ? undefined : (() => { const a = projector(g.epsg), b = projector(r.epsg); return (p: [number, number]) => b.forward(a.inverse(p)); })();
+    const res = returnsStats(g, seg.labels, seg.count, objects, job.returns, toNative);
+    featureDefs.push(...res.defs);
+    returnsExact = res.exact;
+    lap('returns');
+  }
   const coniferScore = scoreConifer(objects);
   if (coniferScore.scored) featureDefs.push(coniferScoreDef());
   else for (const o of objects) delete o.featureValues.conifer_score;
-  return { labels: seg.labels, count: seg.count, objects, featureDefs, seedSpacingPx: seg.seedSpacingPx, coarsePixels, sentinelExact, coniferScore, stageMs };
+  return { labels: seg.labels, count: seg.count, objects, featureDefs, seedSpacingPx: seg.seedSpacingPx, coarsePixels, sentinelExact, returnsExact, coniferScore, stageMs };
 }
 
 function sentinelStats(job: ObjectsJob, s: SentinelInput, prefix: string, dateLabel: string, supportPrefix: string, labels: Int32Array, count: number, objects: ObjectRecord[]) {

@@ -76,6 +76,8 @@ export function fineToNative(g: FineGrid, r: NativeRaster, toNative?: (xy: [numb
 
 export interface CoarseStats {
   mean: Float32Array;
+  /** Area-weighted standard deviation of the native values within the object (NaN with fewer than two valid pixels). */
+  sd: Float32Array;
   support: SupportRecord[];
 }
 
@@ -111,17 +113,18 @@ export function areaWeighted(labels: Int32Array, count: number, nativeIndex: Int
   out._pixels = pixelsOf.map(a => Int32Array.from(a));
   for (const name of planes) {
     const v = r.values[name];
-    const sw = new Float64Array(count), swv = new Float64Array(count), sw2 = new Float64Array(count);
+    const sw = new Float64Array(count), swv = new Float64Array(count), sw2 = new Float64Array(count), swvv = new Float64Array(count), nv = new Uint32Array(count);
     for (const q of pairs) {
       if (q.j < 0) continue;
       const x = v[q.j];
       if (x !== x) continue;
-      sw[q.k] += q.a; swv[q.k] += q.a * x; sw2[q.k] += q.a * q.a;
+      sw[q.k] += q.a; swv[q.k] += q.a * x; sw2[q.k] += q.a * q.a; swvv[q.k] += q.a * x * x; nv[q.k]++;
     }
-    const mean = new Float32Array(count);
+    const mean = new Float32Array(count), sd = new Float32Array(count).fill(NaN);
     const support: SupportRecord[] = [];
     for (let k = 0; k < count; k++) {
       mean[k] = sw[k] > 0 ? swv[k] / sw[k] : NaN;
+      if (nv[k] >= 2) sd[k] = Math.sqrt(Math.max(0, swvv[k] / sw[k] - mean[k] * mean[k]));
       const flags: string[] = [];
       const touched = pixelsOf[k].length;
       if (objArea[k] < nativeArea) flags.push('coarse-subpixel');
@@ -134,7 +137,7 @@ export function areaWeighted(labels: Int32Array, count: number, nativeIndex: Int
         qualityFlags: flags,
       });
     }
-    out[name] = { mean, support };
+    out[name] = { mean, sd, support };
   }
   return out;
 }

@@ -16,6 +16,8 @@
 //   excess green    −    0.15   broadleaf crowns are brighter green
 //   L* texture      +    0.15   conifer crowns cast deeper, finer shadow
 //   apex sharpness  +    0.20   conical crowns against rounded ones
+//   LiDAR veg. int. −    0.25   the laser is NIR: broadleaf crowns return more
+//   attenuation     +    0.15   needle-leaved crowns stop more pulses per metre
 //
 // It describes contrast WITHIN the run — re-scored on every run — not an
 // absolute property. Otsu places the split and Sarle's bimodality coefficient
@@ -38,6 +40,8 @@ export const CONIFER_TERMS: ScoreTerm[] = [
   { id: 'rgb_exg', label: 'photo excess green', sign: -1, weight: 0.15 },
   { id: 'rgb_l_sd', label: 'photo L* texture', sign: 1, weight: 0.15 },
   { id: 'chm_apex', label: 'crown apex sharpness', sign: 1, weight: 0.2 },
+  { id: 'pc_ivg', label: 'LiDAR vegetation intensity (1064 nm)', sign: -1, weight: 0.25 },
+  { id: 'pc_att', label: 'LiDAR canopy attenuation', sign: 1, weight: 0.15 },
 ];
 
 /** Woody: canopy height P90 at least this, and (where known) leaf-on NDVI at least WOODY_NDVI. */
@@ -76,7 +80,7 @@ export function scoreConifer(objects: ObjectRecord[], minWoody = 20): ScoreRepor
     if (v.length < Math.max(10, woody.length / 2)) return [];
     return [{ ...t, ...robust(v), n: v.length }];
   });
-  if (!terms.length) return empty('no line of evidence is available for the woody objects (needs Sentinel-2, a photo or a CHM)');
+  if (!terms.length) return empty('no line of evidence is available for the woody objects (needs Sentinel-2, a photo, a CHM or the point cloud)');
   const total = terms.reduce((a, t) => a + t.weight, 0);
   const scores: number[] = [];
   for (const o of woody) {

@@ -48,7 +48,7 @@ export interface SourceAsset {
   attribution?: string;
 }
 
-export type FeatureGroup = 'rgb' | 'structure' | 'terrain' | 'sentinel' | 'quality' | 'geometry' | 'index';
+export type FeatureGroup = 'rgb' | 'structure' | 'terrain' | 'sentinel' | 'quality' | 'geometry' | 'index' | 'returns';
 
 export interface FeatureDefinition {
   id: string;

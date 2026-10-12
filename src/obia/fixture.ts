@@ -14,6 +14,9 @@
 //   • six 3 × 3 m ponds; a 10 × 6 m NoData corner (top right);
 //   • Sentinel-2 main (leaf-on) and second (leaf-off) dates, 10 m and 20 m
 //     rasters aligned to the fine grid, one cloudy SCL pixel in the main date;
+//   • LiDAR return metrics on a 2 m cell grid (the point cloud's own
+//     support): broadleaf crowns brighter at 1064 nm than conifer, conifer
+//     attenuating more; lichen bright and Sphagnum-free, ponds dark;
 //   • reference polygons at the COMPOSITION level in every stand.
 // The contrasts are deliberately clean: what the fixture proves is that the
 // machinery works, not that real vegetation separates this well.
@@ -22,6 +25,7 @@ import { projector } from './grid.ts';
 import { DEFAULT_SENTINEL, type SegmentParams } from './recipe.ts';
 import type { NativeRaster } from './sentinel.ts';
 import type { SentinelInput } from './pipeline.ts';
+import type { ReturnsInput } from './returns.ts';
 
 export const FIXTURE_LABEL = 'SYNTHETIC TEST FIXTURE (not real data)';
 
@@ -50,6 +54,14 @@ const OFF: Record<Cover, number[]> = {
   graminoid: [0.06, 0.09, 0.11, 0.17, 0.13, 0.15, 0.17, 0.18, 0.28],
   lichen: [0.12, 0.16, 0.18, 0.29, 0.20, 0.25, 0.27, 0.30, 0.30],
   ericaceous: [0.03, 0.05, 0.06, 0.21, 0.08, 0.15, 0.19, 0.22, 0.16],
+};
+// LiDAR returns per cover: [int, ivg, igr, pen, att, den]. ivg/att undefined (NaN) without canopy.
+const RET: Record<Cover, number[]> = {
+  conifer: [105, 95, 120, 0.12, 0.30, 9],
+  broadleaf: [165, 160, 125, 0.18, 0.16, 9],
+  graminoid: [175, NaN, 175, 0.97, NaN, 9],
+  lichen: [215, NaN, 215, 0.99, NaN, 9],
+  ericaceous: [120, NaN, 120, 0.93, NaN, 9],
 };
 const BANDS = ['blue', 'green', 'red', 'nir', 'rededge1', 'rededge2', 'rededge3', 'nir08', 'swir16'];
 
@@ -86,9 +98,20 @@ export function fixtureScene() {
   };
   const sentinel = scene(ON, 'fixture:sentinel-2', true);
   const sentinelB = scene(OFF, 'fixture:sentinel-2-leaf-off', false);
+  const ret: NativeRaster = { key: 'fixture:returns:2m', epsg, originX: x0, originY: y0, res: 2, w: 120, h: 80, values: {} };
+  ['int', 'ivg', 'igr', 'pen', 'att', 'den'].forEach((m, k) => {
+    ret.values[m] = Float32Array.from({ length: 120 * 80 }, (_, j) => {
+      const cx = (j % 120) * 2 + 1, cy = Math.floor(j / 120) * 2 + 1;
+      if (nodata(cx, cy)) return NaN;
+      if (pond(cx, cy)) return k === 0 || k === 2 ? 15 : k === 3 ? 1 : k === 5 ? 2 : NaN;
+      const v = RET[coverAt(cx, cy)][k];
+      return v === v ? v * (1 + (k < 3 ? 0.06 : 0.04) * noise(cx, cy, 40 + k)) : NaN;
+    });
+  });
+  const returns: ReturnsInput = { sourceId: 'fixture:point-cloud', raster: ret, acquisitions: ['fixture'] };
   const params: SegmentParams = { targetAreaM2: 64, compactness: 1, imageryWeight: 1, structureWeight: 1, terrainWeight: 0, mergeSimilarity: 0.6, minPatchAreaM2: 25, keepDistinctAbove: 3 };
   return {
-    w, h, cellM, epsg, x0, y0, planes: { r, g, b, chm }, mask, params, sentinel, sentinelB,
+    w, h, cellM, epsg, x0, y0, planes: { r, g, b, chm }, mask, params, sentinel, sentinelB, returns,
     pondIndex: 41 * w + 91,
     isForest: (i: number) => forestAt(i % w),
     coverOf: (i: number) => coverAt(i % w, Math.floor(i / w)),
