@@ -19,6 +19,15 @@ export interface XyzService {
   template: string;
   maxZoom: number;
   attribution: string;
+  /**
+   * Whether tiles may feed an ANALYSIS. A basemap tile service is a picture
+   * for display: its zoom is not a native resolution, and its terms rarely
+   * cover derived products. `reference-only` keeps it as a backdrop.
+   * `unconfirmed`: usable only after the user states the terms were checked
+   * (the OBIA tab records that statement in the recipe).
+   */
+  access: 'reference-only' | 'unconfirmed';
+  accessNote: string;
 }
 
 export const ORTHO_SERVICES: XyzService[] = [
@@ -26,16 +35,19 @@ export const ORTHO_SERVICES: XyzService[] = [
     id: 'nsodb10k', label: 'Nova Scotia orthophoto (NSODB 1:10 000)', maxZoom: 19,
     template: 'https://nsgiwa.novascotia.ca/arcgis/rest/services/BASE/BASE_NSODB_10k_WM84/MapServer/tile/{z}/{y}/{x}',
     attribution: 'Orthophoto © Province of Nova Scotia (NSGI)',
+    access: 'unconfirmed', accessNote: 'Whether NSODB terms permit derived analytical products has not been confirmed; the downloadable files are sold under a restricted licence.',
   },
   {
     id: 'nsodb2k', label: 'Nova Scotia orthophoto (NSODB 1:2 000, urban)', maxZoom: 19,
     template: 'https://nsgiwa.novascotia.ca/arcgis/rest/services/BASE/BASE_NSODB_2k_WM84/MapServer/tile/{z}/{y}/{x}',
     attribution: 'Orthophoto © Province of Nova Scotia (NSGI)',
+    access: 'unconfirmed', accessNote: 'Whether NSODB terms permit derived analytical products has not been confirmed; the downloadable files are sold under a restricted licence.',
   },
   {
     id: 'esri', label: 'Esri World Imagery', maxZoom: 19,
     template: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     attribution: 'Imagery © Esri, Maxar, Earthstar Geographics',
+    access: 'reference-only', accessNote: 'A basemap tile service: displayed as a backdrop only, never sampled into an analysis.',
   },
 ];
 export const orthoService = (id: string) => ORTHO_SERVICES.find(s => s.id === id) ?? null;

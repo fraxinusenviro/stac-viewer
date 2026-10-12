@@ -21,6 +21,8 @@ export interface SlicOptions {
   /** Weight of space against features: at 1, one feature unit costs as much as `step` pixels. */
   compactness: number;
   iterations?: number;
+  /** Connected fragments smaller than this many pixels are absorbed into a neighbour (default S²/4). */
+  minFragment?: number;
 }
 
 /** Superpixel labels 0..n−1 (−1 where every feature is missing), connected, small fragments absorbed. */
@@ -76,7 +78,7 @@ export function slic(features: Float32Array[], w: number, h: number, o: SlicOpti
       for (let f = 0; f < nF; f++) cf[k * nF + f] = nf[k * nF + f] ? sf[k * nF + f] / nf[k * nF + f] : NaN;
     }
   }
-  return connect(label, w, h, Math.max(1, Math.floor((S * S) / 4)));
+  return connect(label, w, h, o.minFragment ?? Math.max(1, Math.floor((S * S) / 4)));
 }
 
 /**

@@ -18,7 +18,7 @@
 
 import maplibregl from 'maplibre-gl';
 import proj4 from 'proj4';
-import { fromUrl, type GeoTIFF, type GeoTIFFImage } from 'geotiff';
+import { fromBlob, fromUrl, type GeoTIFF, type GeoTIFFImage } from 'geotiff';
 import { projDef } from './crs.ts';
 import { paint, channelStats, classCounts, type ChannelStats } from './paint.ts';
 import { paintSpec, type ChannelFn, type Planes, type Product, type ProductStyle } from './products.ts';
@@ -33,7 +33,7 @@ import {
 
 // ── Files ───────────────────────────────────────────────────────────────────
 
-interface CogFile {
+export interface CogFile {
   url: string;
   images: GeoTIFFImage[];
   factors: number[];
@@ -48,6 +48,19 @@ interface CogFile {
 
 const files = new Map<string, Promise<CogFile>>();
 
+/**
+ * Local files (an imported GeoTIFF) addressed as `local:<id>` wherever a URL
+ * goes. Read with ranged Blob slices, never loaded whole.
+ */
+const localFiles = new Map<string, Blob>();
+export function registerLocalFile(id: string, blob: Blob): string {
+  const key = `local:${id}`;
+  localFiles.set(key, blob);
+  files.delete(key);
+  return key;
+}
+export const hasLocalFile = (key: string) => localFiles.has(key);
+
 /** Open a COG once per URL (every layer and every input shares it). */
 export function openFile(url: string): Promise<CogFile> {
   let p = files.get(url);
@@ -56,7 +69,9 @@ export function openFile(url: string): Promise<CogFile> {
       // A larger block cache than geotiff's default (100 × 64 KiB), so many
       // tiles reading one file at once do not evict each other's blocks
       // (geotiff accepts the option; its typings omit it).
-      const tiff: GeoTIFF = await fromUrl(url, { allowFullFile: false, cacheSize: 1024 } as Parameters<typeof fromUrl>[1]);
+      const local = localFiles.get(url);
+      if (url.startsWith('local:') && !local) throw new Error('this local file is not loaded in this session: import it again');
+      const tiff: GeoTIFF = local ? await fromBlob(local) : await fromUrl(url, { allowFullFile: false, cacheSize: 1024 } as Parameters<typeof fromUrl>[1]);
       const count = await tiff.getImageCount();
       const all: GeoTIFFImage[] = [];
       for (let i = 0; i < count; i++) all.push(await tiff.getImage(i));
@@ -418,4 +433,55 @@ export async function sampleView(sources: Record<string, InputSource>, box: LonL
   const w = Math.max(16, Math.round(aspect >= 1 ? S : S * aspect)), h = Math.max(16, Math.round(aspect >= 1 ? S / aspect : S));
   const grid = boxGrid(box, w, h);
   return { planes: await planesFor(sources, grid, sharpen), n: w * h, grid: { ...grid, box } };
+}
+
+// ── Native windows (OBIA) ───────────────────────────────────────────────────
+
+export interface NativeWindow {
+  epsg: number;
+  /** Top-left corner of the window and its pixel size (full resolution, level 0). */
+  originX: number;
+  originY: number;
+  res: number;
+  w: number;
+  h: number;
+  /** One plane per requested input key, scaled to values; NaN = no data. */
+  values: Record<string, Float32Array>;
+}
+
+/**
+ * Read inputs that share ONE file at its FULL native resolution (overview
+ * level 0), over a window covering a lon/lat box — never resampled, never
+ * read from an overview. Refused, not shrunk, past `maxPx` pixels, and
+ * refused when the pixels are not square or the grid is rotated.
+ */
+export async function readNative(entries: [string, InputSource][], box: LonLatBox, maxPx = MAX_WINDOW_PX): Promise<NativeWindow> {
+  const url = entries[0][1].url;
+  if (entries.some(([, s]) => s.url !== url)) throw new Error('readNative reads one file at a time');
+  const f = await openFile(url);
+  const { originX, originY, resX, resY } = f.geo;
+  if (Math.abs(Math.abs(resX) - Math.abs(resY)) > 1e-9 || resY >= 0) throw new Error(`${url.split('/').pop()}: non-square or south-up pixels are not supported`);
+  const corners: [number, number][] = [[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]], [(box[0] + box[2]) / 2, box[1]], [(box[0] + box[2]) / 2, box[3]], [box[0], (box[1] + box[3]) / 2], [box[2], (box[1] + box[3]) / 2]];
+  const xy = corners.map(c => f.toSrc(c));
+  const c0 = Math.max(0, Math.floor((Math.min(...xy.map(p => p[0])) - originX) / resX) - 1), c1 = Math.min(f.width, Math.ceil((Math.max(...xy.map(p => p[0])) - originX) / resX) + 1);
+  const r0 = Math.max(0, Math.floor((Math.max(...xy.map(p => p[1])) - originY) / resY) - 1), r1 = Math.min(f.height, Math.ceil((Math.min(...xy.map(p => p[1])) - originY) / resY) + 1);
+  const w = c1 - c0, h = r1 - r0;
+  if (w <= 0 || h <= 0) throw new Error(`${url.split('/').pop()} does not cover the study area`);
+  if (w * h > maxPx) throw new Error(`${url.split('/').pop()}: the window would be ${w} × ${h} native pixels (limit ${maxPx.toLocaleString()}); use a smaller study area`);
+  const samples = [...new Set(entries.map(([, s]) => s.sample))];
+  const data = (await withDeadline(f.images[0].readRasters({ window: [c0, r0, c1, r1], samples, interleave: false }), READ_DEADLINE_MS * 3)) as unknown as ArrayLike<number>[];
+  const values: Record<string, Float32Array> = {};
+  for (const [k, s] of entries) {
+    const band = data[samples.indexOf(s.sample)], out = new Float32Array(w * h).fill(NaN), min = s.minValid ?? -Infinity;
+    for (let i = 0; i < w * h; i++) { const dn = band[i]; if (dn === s.nodata || !Number.isFinite(dn)) continue; const v = dn * s.scale + s.offset; if (v >= min) out[i] = v; }
+    values[k] = out;
+  }
+  return { epsg: f.epsg, originX: originX + c0 * resX, originY: originY + r0 * resY, res: resX, w, h, values };
+}
+
+/** A file's own metadata (CRS, native resolution, size, bands) for the sources step. */
+export async function describeFile(url: string): Promise<{ epsg: number; resM: number; width: number; height: number; bands: number; bounds: LonLatBox; nodata: number | null; bitsPerSample: number }> {
+  const f = await openFile(url);
+  const im = f.images[0];
+  return { epsg: f.epsg, resM: Math.abs(f.geo.resX), width: f.width, height: f.height, bands: im.getSamplesPerPixel(), bounds: f.bounds, nodata: f.fileNodata, bitsPerSample: im.getBitsPerSample() };
 }

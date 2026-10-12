@@ -17,8 +17,7 @@ import { aoiAreaM2, aoiBox, boxPolygon, closeRing, fmtArea, parseAois, uniqueAoi
 import { segBar } from '../ui/steps.ts';
 import { mapClaim, type Ctx } from './ctx.ts';
 
-const LS_AOIS = 'sv.aois', LS_CHOICE = 'sv.aoi.choice';
-const SRC = 'aoi', DRAFT = 'aoi-draft';
+const LS_AOIS = 'sv.aois';
 const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
 
 type Kind = 'view' | 'saved' | 'draw';
@@ -39,9 +38,21 @@ export interface StudyAreaStep {
   zoomTo(aoi: Aoi): void;
 }
 
-export function studyAreaStep(ctx: Ctx, changed: () => void): StudyAreaStep {
+/** Saved areas are shared by every tab's picker: a save in one is announced to the others. */
+const aoiEvents = new EventTarget();
+
+export function studyAreaStep(ctx: Ctx, changed: () => void, opts: { prefix?: string; pane?: string } = {}): StudyAreaStep {
   const { map, say } = ctx;
+  const P = opts.prefix ?? 'aoi', PANE = opts.pane ?? 'pane-fusion';
+  const LS_CHOICE = P === 'aoi' ? 'sv.aoi.choice' : `sv.${P}.choice`;
+  const SRC = P, DRAFT = `${P}-draft`;
   let aois = parseAois(load(LS_AOIS, []));
+  aoiEvents.addEventListener('change', (e) => {
+    if ((e as CustomEvent).detail === P) return;
+    aois = parseAois(load(LS_AOIS, []));
+    if (selected && !aois.some(a => a.id === selected)) { selected = aois[aois.length - 1]?.id ?? null; if (!selected && kind === 'saved') kind = 'view'; }
+    paint(); changed();
+  });
   const stored = load<{ kind: Kind; id: string | null }>(LS_CHOICE, { kind: 'view', id: null });
   let kind: Kind = stored.kind === 'saved' && aois.some(a => a.id === stored.id) ? 'saved' : 'view';
   let selected: string | null = kind === 'saved' ? stored.id : aois[aois.length - 1]?.id ?? null;
@@ -52,7 +63,7 @@ export function studyAreaStep(ctx: Ctx, changed: () => void): StudyAreaStep {
   let draftName = '';
   let renaming = false;
 
-  const saveAll = () => store(LS_AOIS, aois);
+  const saveAll = () => { store(LS_AOIS, aois); aoiEvents.dispatchEvent(new CustomEvent('change', { detail: P })); };
   const saveChoice = () => store(LS_CHOICE, { kind: kind === 'draw' ? 'saved' : kind, id: selected });
   const selectedAoi = () => aois.find(a => a.id === selected) ?? null;
   const drawing = () => kind === 'draw' && !finished;
@@ -62,16 +73,16 @@ export function studyAreaStep(ctx: Ctx, changed: () => void): StudyAreaStep {
   map.on('load', () => {
     map.addSource(SRC, { type: 'geojson', data: EMPTY });
     map.addSource(DRAFT, { type: 'geojson', data: EMPTY });
-    map.addLayer({ id: 'aoi-fill', type: 'fill', source: SRC, paint: { 'fill-color': '#d9a441', 'fill-opacity': 0.06 } });
-    map.addLayer({ id: 'aoi-line', type: 'line', source: SRC, paint: { 'line-color': '#d9a441', 'line-width': 2.5 } });
-    map.addLayer({ id: 'aoi-draft-fill', type: 'fill', source: DRAFT, filter: ['==', ['geometry-type'], 'Polygon'], paint: { 'fill-color': '#d9a441', 'fill-opacity': 0.12 } });
-    map.addLayer({ id: 'aoi-draft-line', type: 'line', source: DRAFT, paint: { 'line-color': '#d9a441', 'line-width': 2, 'line-dasharray': [2, 1.5] } });
-    map.addLayer({ id: 'aoi-draft-pts', type: 'circle', source: DRAFT, filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-radius': 4, 'circle-color': '#fff', 'circle-stroke-color': '#d9a441', 'circle-stroke-width': 2 } });
+    map.addLayer({ id: `${P}-fill`, type: 'fill', source: SRC, paint: { 'fill-color': '#d9a441', 'fill-opacity': 0.06 } });
+    map.addLayer({ id: `${P}-line`, type: 'line', source: SRC, paint: { 'line-color': '#d9a441', 'line-width': 2.5 } });
+    map.addLayer({ id: `${P}-draft-fill`, type: 'fill', source: DRAFT, filter: ['==', ['geometry-type'], 'Polygon'], paint: { 'fill-color': '#d9a441', 'fill-opacity': 0.12 } });
+    map.addLayer({ id: `${P}-draft-line`, type: 'line', source: DRAFT, paint: { 'line-color': '#d9a441', 'line-width': 2, 'line-dasharray': [2, 1.5] } });
+    map.addLayer({ id: `${P}-draft-pts`, type: 'circle', source: DRAFT, filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-radius': 4, 'circle-color': '#fff', 'circle-stroke-color': '#d9a441', 'circle-stroke-width': 2 } });
     paint();
   });
 
   // The outline belongs to the Fusion tab, like the point-cloud footprints to theirs.
-  const fusionOpen = () => !document.getElementById('pane-fusion')!.hidden;
+  const fusionOpen = () => !document.getElementById(PANE)!.hidden;
   document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => setTimeout(paint, 0)));
 
   function paint() {

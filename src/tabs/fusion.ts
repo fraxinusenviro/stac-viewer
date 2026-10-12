@@ -77,7 +77,8 @@ export function initFusion(ctx: Ctx) {
   let mode: 'fusion-sgw' | 'fusion-sharp-fcir' | 'fusion-pcir' | 'fusion-pc-evidence' | 'custom' | 'rules' | 'strata' = 'strata';
   // The point cloud and the orthophoto: device-local choices.
   const src = load<{ ortho: string; pc: boolean; display: 'classes' | 'tint'; alpha: number }>(LS_SOURCES, { ortho: 'nsodb10k', pc: true, display: 'classes', alpha: 0.45 });
-  let orthoId = src.ortho, usePc = src.pc, display = src.display, tintAlpha = src.alpha;
+  // A stored choice of a reference-only service (Esri basemap tiles) is not honoured.
+  let orthoId = orthoService(src.ortho)?.access === 'reference-only' ? '' : src.ortho, usePc = src.pc, display = src.display, tintAlpha = src.alpha;
   const saveSources = () => save(LS_SOURCES, { ortho: orthoId, pc: usePc, display, alpha: tintAlpha });
   let photoYear = '';
   const pcLine = h('p', { class: 'muted small', 'aria-live': 'polite' });
@@ -386,7 +387,7 @@ export function initFusion(ctx: Ctx) {
       h('label', { class: 'field' }, 'Leaf-off scene (optional, for seasonal change)', h('select', { onchange: (e: Event) => { offId = (e.target as HTMLSelectElement).value; redraw(); } },
         h('option', { value: '', selected: !offId }, 'None'), ...scenes.filter(s => s.id !== sceneId).map(s => sceneOpt(s, offId)))),
       h('label', { class: 'field' }, 'Orthophoto (sub-metre RGB)', h('select', { onchange: (e: Event) => { orthoId = (e.target as HTMLSelectElement).value; photoYear = ''; saveSources(); redraw(); } },
-        h('option', { value: '', selected: !orthoId }, 'None'), ...ORTHO_SERVICES.map(o => h('option', { value: o.id, selected: o.id === orthoId }, o.label)))),
+        h('option', { value: '', selected: !orthoId }, 'None'), ...ORTHO_SERVICES.map(o => h('option', { value: o.id, selected: o.id === orthoId, disabled: o.access === 'reference-only', title: o.accessNote }, o.label + (o.access === 'reference-only' ? ' (reference only)' : ''))))),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: usePc, onchange: (e: Event) => { usePc = (e.target as HTMLInputElement).checked; saveSources(); redraw(); } }),
         'LiDAR point cloud (intensity, penetration, attenuation — read from the COPC tiles, from zoom 13)'),
       pcLine);

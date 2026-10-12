@@ -13,6 +13,7 @@ import type { Ctx } from './tabs/ctx.ts';
 import { initRasters } from './tabs/rasters.ts';
 import { initImagery } from './tabs/imagery.ts';
 import { initFusion } from './tabs/fusion.ts';
+import { initObia } from './tabs/obia.ts';
 import { BASE_ANCHOR, initBasemap } from './tabs/basemap.ts';
 
 const TILE_MIN_ZOOM = 10;
@@ -245,3 +246,4 @@ initBasemap(ctx, Object.keys(BASEMAPS));
 initRasters(ctx);
 initImagery(ctx);
 initFusion(ctx);
+initObia(ctx);
