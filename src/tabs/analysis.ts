@@ -18,14 +18,16 @@
 //
 // Tapping the map inspects the topmost visible result under the tap.
 
-import maplibregl, { type GeoJSONSource, type ImageSource, type MapMouseEvent } from 'maplibre-gl';
+import maplibregl, { type GeoJSONSource, type MapMouseEvent } from 'maplibre-gl';
 import { h } from '../dom.ts';
-import { defaultStyle, variableById, type Planes, type Product, type ProductStyle } from '../products.ts';
+import { defaultStyle, variableById, variableProduct, type Planes, type Product, type ProductStyle } from '../products.ts';
 import type { InputSource } from '../engine.ts';
 import { rampTable } from '../paint.ts';
 import { aoiAreaM2, fmtArea, pointInAoi, type Aoi } from '../aoi.ts';
 import { runClassAreas, type ClassAreaResult } from '../analysis/classAreas.ts';
 import { classAreasCsv, tallyClasses, type ClassTally } from '../analysis/tally.ts';
+import { clusterInputs, clusterVariables, runClusters, type ClusterParams, type ClusterResult } from '../analysis/clusterRun.ts';
+import { clusterProfileCsv } from '../analysis/cluster.ts';
 import { DEFAULT_SEGMENT, objectAttributes, pixelAt, segmentGeoJSON, segmentImage, segmentView, type SegmentGrid, type SegmentParams, type SegmentResult } from '../segment/segmentView.ts';
 import { buildFeatureTable, type FeatureTable } from '../segment/featureTable.ts';
 import { tableCsv, tableGeoParquet } from '../segment/featureTableExport.ts';
@@ -35,7 +37,7 @@ import { ANCHOR, mapClaim, type Ctx } from './ctx.ts';
 import { toc } from '../layers/toc.ts';
 import { aoiBox } from '../aoi.ts';
 
-export type ToolId = 'areas' | 'objects' | 'table';
+export type ToolId = 'areas' | 'objects' | 'table' | 'cluster';
 
 export interface AnalysisHost {
   ctx: Ctx;
@@ -59,6 +61,7 @@ export const ANALYSIS_TOOLS: ToolDef[] = [
   { id: 'areas', name: 'Class areas', blurb: 'The classes of step 3 evaluated at every pixel of the study area (2 m wherever the area allows), with the hectares and share of each. The on-screen legend only ever counts the view, off overview pixels; this is the figure for the area.' },
   { id: 'objects', name: 'Objects', blurb: 'Splits the study area into objects on canopy height and the orthophoto (superpixels, then neighbours merged — or individual tree crowns), averages every input over each object, adds object measures (area, compactness, canopy-height P90 and spread, photo texture) and classifies each object with the classes of step 3. Objects cut by the area\'s outline keep only their inside part. A screening tool: Sentinel-2 values here are fine-grid samples of 10–20 m pixels; for native-support statistics, training and validation use the Objects tab.' },
   { id: 'table', name: 'Feature table', blurb: "One row per cell of Sentinel-2's own pixel grid (the imagery is never resampled), one column per variable: every finer input averaged into the cell, canopy-height P90 and spread, photo texture, the share of the cell in each class of step 3, and H3 ids. Cells less than half inside the area are left out. GeoParquet or CSV." },
+  { id: 'cluster', name: 'Unsupervised classes (k-means)', blurb: 'Groups every pixel of the study area by the variables you choose, with no rules and no labels: k-means on standardised variables. Each cluster is reported with its centre in the variables\' own units, so you can name it; a cluster is a statistical group, not a cover type.' },
 ];
 
 interface Common {
@@ -79,6 +82,7 @@ interface Common {
 }
 type Result = Common & (
   | { tool: 'areas'; data: ClassAreaResult }
+  | { tool: 'cluster'; data: ClusterResult; params: ClusterParams }
   | { tool: 'objects'; data: SegmentResult; params: SegmentParams; fill: boolean }
   | { tool: 'table'; data: FeatureTable; cellM: 10 | 20; column: string; range: string });
 
@@ -99,6 +103,7 @@ export interface RunOptions {
   area?: Aoi;
   segment?: SegmentParams;
   cellM?: 10 | 20;
+  cluster?: ClusterParams;
   /** Instead of switching the Fusion tab to its Results page. */
   onDone?: () => void;
 }
@@ -143,7 +148,7 @@ export function analysisStep(host: AnalysisHost) {
 
   function imageOf(r: Result): ImageData {
     if (r.tool === 'objects') return segmentImage(r.data, r.fill);
-    if (r.tool === 'areas') {
+    if (r.tool === 'areas' || r.tool === 'cluster') {
       const { grid, classOf } = r.data;
       const img = new ImageData(grid.w, grid.h), d = img.data;
       const colour = new Map((r.classes ?? []).map(c => [c.value, hex(c.colour)]));
@@ -185,12 +190,12 @@ export function analysisStep(host: AnalysisHost) {
     const [W, S, E, N] = gridOf(r).box;
     const coordinates: [[number, number], [number, number], [number, number], [number, number]] = [[W, N], [E, N], [E, S], [W, S]];
     const id = layerId(r);
-    const src = map.getSource(id) as ImageSource | undefined;
-    if (src) src.updateImage({ url, coordinates });
-    else {
-      map.addSource(id, { type: 'image', url, coordinates });
-      map.addLayer({ id, type: 'raster', source: id, layout: { visibility: r.visible ? 'visible' : 'none' }, paint: { 'raster-opacity': r.opacity, 'raster-fade-duration': 0, 'raster-resampling': 'nearest' } }, ANCHOR.fusion);
-    }
+    // Replaced rather than updateImage()d: an update while the previous image is still decoding aborts it
+    // (a rename or a recolour straight after a run). The table of contents keeps the entry's place and switches.
+    if (map.getLayer(id)) map.removeLayer(id);
+    if (map.getSource(id)) map.removeSource(id);
+    map.addSource(id, { type: 'image', url, coordinates });
+    map.addLayer({ id, type: 'raster', source: id, layout: { visibility: r.visible ? 'visible' : 'none' }, paint: { 'raster-opacity': r.opacity, 'raster-fade-duration': 0, 'raster-resampling': 'nearest' } }, ANCHOR.fusion);
     register(r);
   }
 
@@ -264,12 +269,18 @@ export function analysisStep(host: AnalysisHost) {
     note(`${def.name} on "${area.name}" (${fmtArea(aoiAreaM2(area.geometry))}) started.`);
     const t0 = performance.now();
     try {
-      const product = host.classProduct();
+      // Clusters read only their own variables; the class product plays no part.
+      const cParams = id === 'cluster' ? (again?.tool === 'cluster' ? again.params : opts.cluster) : undefined;
+      if (id === 'cluster' && !cParams) throw new Error('no variables chosen');
+      const product = id === 'cluster' ? null : host.classProduct();
       const style = product ? defaultStyle(product) : null;
-      const sources = host.sources(product?.inputs ?? []);
-      const base = { id: again?.id ?? nextId++, area, at: new Date(), productLabel: product?.label ?? null, sig: host.signature(), provenance: host.provenance(), visible: true, opacity: again?.opacity ?? 0.8, downloaded: false, classes: product?.classes };
+      const sources = host.sources(id === 'cluster' ? clusterInputs(clusterVariables(cParams!.vars)) : product?.inputs ?? []);
+      const base = { id: again?.id ?? nextId++, area, at: new Date(), productLabel: id === 'cluster' ? `k-means, ${cParams!.k} clusters` : product?.label ?? null, sig: host.signature(), provenance: host.provenance(), visible: true, opacity: again?.opacity ?? 0.8, downloaded: false, classes: product?.classes };
       let r: Result;
-      if (id === 'areas') {
+      if (id === 'cluster') {
+        const data = await runClusters(area.geometry, sources, cParams!, stage);
+        r = { ...base, tool: 'cluster', data, params: cParams!, classes: data.classes, tally: data.tally, ms: performance.now() - t0 };
+      } else if (id === 'areas') {
         const data = await runClassAreas(area.geometry, sources, product!, style!, stage);
         r = { ...base, tool: 'areas', data, tally: data.tally, ms: performance.now() - t0 };
       } else if (id === 'objects') {
@@ -298,6 +309,7 @@ export function analysisStep(host: AnalysisHost) {
   }
 
   function summary(r: Result): string {
+    if (r.tool === 'cluster') return `${r.data.model.k} clusters on ${r.data.vars.length} variable${r.data.vars.length === 1 ? '' : 's'} over ${fmtArea(r.data.tally.areaM2)} at ${r.data.grid.cellM.toFixed(1)} m; ${(r.data.model.explained * 100).toFixed(0)} % of the variance between clusters${r.data.missingShare > 0.005 ? `; ${(r.data.missingShare * 100).toFixed(1)} % of the area unclassified (a variable missing)` : ''}`;
     if (r.tool === 'areas') return `${r.tally?.rows.length ?? 0} classes over ${fmtArea(r.data.tally.areaM2)} at ${r.data.grid.cellM.toFixed(1)} m`;
     if (r.tool === 'objects') return `${r.data.count.toLocaleString()} ${r.params.method === 'crowns' ? 'crowns' : 'objects'} at ${r.data.grid.cellM.toFixed(1)} m`;
     return `${r.data.rows.length.toLocaleString()} cells × ${r.data.columns.length + r.data.shares.length} variables (${r.data.lattice})`;
@@ -329,7 +341,13 @@ export function analysisStep(host: AnalysisHost) {
       if (i < 0) continue;
       const head = h('div', { class: 'muted small' }, `#${r.id} ${toolDef(r.tool).name} · ${r.area.name}`);
       let body: HTMLElement | null = null;
-      if (r.tool === 'areas') {
+      if (r.tool === 'cluster') {
+        const c = r.data.classOf[i];
+        const cls = r.classes?.find(x => x.value === c);
+        const vals = r.data.vars.map(v => [v.label, v.channel.fn(r.data.planes, i, defaultStyle(variableProduct(v)))] as [string, number]);
+        body = h('div', {}, h('strong', {}, cls ? cls.label : 'Unclassified (a variable missing)'),
+          h('table', {}, ...vals.map(([k, v]) => h('tr', {}, h('th', {}, k), h('td', {}, fmt(v))))));
+      } else if (r.tool === 'areas') {
         const c = r.data.classOf[i];
         const cls = r.classes?.find(x => x.value === c);
         const style = defaultStyle(r.data.product);
@@ -368,10 +386,13 @@ export function analysisStep(host: AnalysisHost) {
   }
   const runLabel = (r: Result) => `#${r.id} ${toolDef(r.tool).name}`;
 
-  async function download(r: Result, what: 'areas' | 'geojson' | 'parquet' | 'csv') {
+  async function download(r: Result, what: 'areas' | 'geojson' | 'parquet' | 'csv' | 'profile') {
     const stem = `${slug(r.area.name)}_${r.tool}_${r.id}`;
     try {
-      if (what === 'areas' && r.tally) save(`${stem}_class_areas.csv`, classAreasCsv(r.tally, { run: runLabel(r), area: r.area.name, product: r.productLabel ?? '' }), 'text/csv');
+      if (what === 'profile' && r.tool === 'cluster') {
+        const areas = r.data.classes.map(c => r.tally?.rows.find(x => x.value === c.value)?.areaM2 ?? 0);
+        save(`${stem}_cluster_profiles.csv`, clusterProfileCsv(r.data.model, r.data.classes.map(c => c.label), r.data.vars, areas), 'text/csv');
+      } else if (what === 'areas' && r.tally) save(`${stem}_class_areas.csv`, classAreasCsv(r.tally, { run: runLabel(r), area: r.area.name, product: r.productLabel ?? '' }), 'text/csv');
       else if (what === 'geojson' && r.tool === 'objects') {
         note('Tracing object outlines…');
         await new Promise(res => setTimeout(res, 0));
@@ -473,6 +494,36 @@ export function analysisStep(host: AnalysisHost) {
     return list;
   }
 
+  /**
+   * The clusters as a table to NAME them from: each row a cluster (its colour
+   * and name editable), its area and share, and its centre in every variable's
+   * own units. Renaming relabels the map, the legend and the downloads.
+   */
+  function clusterProfile(r: Result & { tool: 'cluster' }): HTMLElement {
+    const d = r.data, m = d.model;
+    const renamed = () => {
+      r.tally = d.tally = tallyClasses(d.classOf, d.mask, d.classes, d.grid.cellM * d.grid.cellM);
+      r.classes = d.classes;
+      draw(r);
+    };
+    const head = h('tr', {}, h('th', {}, ''), h('th', {}, 'Name'), h('th', {}, 'Area'), ...d.vars.map(v => h('th', { title: v.label }, v.id)));
+    const rows = d.classes.map((c, k) => {
+      const row = d.tally.rows.find(x => x.value === c.value);
+      return h('tr', {},
+        h('td', {}, h('input', { type: 'color', value: c.colour, 'aria-label': `Colour of ${c.label}`, class: 'cl-colour', onchange: (e: Event) => { c.colour = (e.target as HTMLInputElement).value; renamed(); } })),
+        h('td', {}, h('input', { type: 'text', value: c.label, 'aria-label': `Name of cluster ${k + 1}`, class: 'cl-name', onchange: (e: Event) => { c.label = (e.target as HTMLInputElement).value.trim() || `Cluster ${k + 1}`; renamed(); events.dispatchEvent(new Event('change')); } })),
+        h('td', {}, row ? `${fmtArea(row.areaM2)} · ${(row.share * 100).toFixed(row.share < 0.01 ? 1 : 0)} %` : '—'),
+        ...m.centresRaw[k].map(v => h('td', {}, fmt(v))));
+    });
+    return h('div', { class: 'cmp-wrap' },
+      h('p', { class: 'muted small' }, `Cluster centres in each variable's own units${r.params.standardise ? ' (clustered on z-scores, so every variable counts equally)' : ' (clustered on raw values: variables with large numbers dominate)'}. Name each cluster from its profile and what you know of the ground: a cluster is a statistical group, not a cover type.`),
+      h('table', { class: 'cmp cl-table' }, h('thead', {}, head), h('tbody', {}, ...rows)),
+      d.missingShare > 0.005 ? h('p', { class: d.missingShare > 0.2 ? 'note small' : 'muted small' }, `${(d.missingShare * 100).toFixed(1)} % of the area is unclassified because a variable has no value there: `,
+        d.vars.map((v, j) => `${v.label} ${(d.coverage[j] * 100).toFixed(0)} %`).join(', '), ' of the area covered. ',
+        d.vars.some((v, j) => v.id.startsWith('pc_') && d.coverage[j] < 0.9) ? 'Point-cloud metrics exist only where enough returns of their kind fall (vegetation intensity only over vegetation > 0.5 m, attenuation only under ≥ 2 m of canopy); leave them out to classify the whole area.' : '') : null,
+      h('p', { class: 'muted small' }, `${m.valid.toLocaleString()} pixels with every variable; centres fitted on ${m.sampled.toLocaleString()} (seed ${r.params.seed}), ${m.iterations} iteration${m.iterations === 1 ? '' : 's'}${m.converged ? '' : ' (stopped before converging)'}. ${(m.explained * 100).toFixed(0)} % of the variance lies between clusters.`));
+  }
+
   function card(r: Result): HTMLElement {
     const stale = r.sig !== host.signature();
     const def = toolDef(r.tool);
@@ -486,7 +537,8 @@ export function analysisStep(host: AnalysisHost) {
     el.append(h('p', { class: 'muted small' }, `${r.productLabel ? `Classes: ${r.productLabel}. ` : 'No classes. '}${r.provenance}`));
     if (stale) el.append(h('div', { class: 'note small' }, 'The classes or inputs have changed since this run. ',
       h('button', { class: 'chip', disabled: !!busy, onclick: () => void run(r.tool, r) }, 'Run again on this area')));
-    if (r.tally && r.tally.rows.length) el.append(classTable(r.tally));
+    if (r.tool === 'cluster') el.append(clusterProfile(r));
+    else if (r.tally && r.tally.rows.length) el.append(classTable(r.tally));
     else if (r.tool !== 'table' && !r.tally) el.append(h('p', { class: 'muted small' }, 'Not classified (no classes were chosen in step 3).'));
     if (r.tool === 'objects') el.append(h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: r.fill, onchange: (e: Event) => { r.fill = (e.target as HTMLInputElement).checked; draw(r); } }), 'Fill by class (else outlines only)'));
     if (r.tool === 'table') {
@@ -501,6 +553,7 @@ export function analysisStep(host: AnalysisHost) {
       onchange: (e: Event) => toc().setOpacity(layerId(r), +(e.target as HTMLInputElement).value) })));
     const actions = h('div', { class: 'row' }, h('button', { class: 'chip', onclick: () => host.area.zoomTo(r.area) }, 'Zoom to'));
     if (r.tally) actions.append(h('button', { class: 'chip', onclick: () => void download(r, 'areas') }, 'Class areas CSV'));
+    if (r.tool === 'cluster') actions.append(h('button', { class: 'chip', onclick: () => void download(r, 'profile') }, 'Cluster profiles CSV'));
     if (r.tool === 'objects') actions.append(h('button', { class: 'chip', onclick: () => void download(r, 'geojson') }, 'Objects GeoJSON'));
     if (r.tool === 'table') actions.append(h('button', { class: 'chip', onclick: () => void download(r, 'parquet') }, 'GeoParquet'), h('button', { class: 'chip', onclick: () => void download(r, 'csv') }, 'CSV'));
     if (r.area.source === 'view' && !host.area.isSaved(r.area.id)) actions.append(h('button', { class: 'chip', title: 'Keep this ground as a study area to run other tools on', onclick: () => {

@@ -37,7 +37,8 @@ test('every product, variable and tool a tool names exists', () => {
     if (t.runner === 'pc-metric') for (const o of (t.params[0] as { options: { value: string }[] }).options) assert.ok(variableById.get(o.value)?.inputs.every(k => k.startsWith('pc:')), o.value);
     if (t.runner === 'variable-map') assert.ok(variableById.has(String(v.variable)));
     if (t.runner === 'fusion-rgb') for (const k of ['r', 'g', 'b']) assert.ok(variableById.has(String(v[k])), `${t.id}.${k}`);
-    if (t.runner === 'analysis') assert.ok(['areas', 'objects', 'table'].includes(t.fixed!.tool), t.id);
+    if (t.runner === 'analysis') assert.ok(['areas', 'objects', 'table', 'cluster'].includes(t.fixed!.tool), t.id);
+    for (const p of t.params) if (p.type === 'variables') for (const id of p.default.split(',')) assert.ok(variableById.has(id), `${t.id}.${p.id}: ${id}`);
     if (t.runner === 'objects-tab') assert.ok(['objects', 'classify', 'review'].includes(t.fixed!.step), t.id);
   }
 });

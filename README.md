@@ -130,6 +130,24 @@ adjustable **Z-factor** (×1–×20) and sun azimuth. The mosaic is ~56 regional
 up and drawn as you pan (1 m where it exists, 2 m elsewhere, from zoom 8). The light basemap stays underneath, outside
 coverage. The same Z-factor and azimuth controls appear on every hillshade layer in the Rasters tab.
 
+## Unsupervised classes (k-means)
+
+Beside the rule-based classes, **Toolbox ▸ LiDAR × imagery fusion ▸ Classification ▸ Unsupervised classes (k-means)**
+finds the groups the data falls into without rules or labels. Choose any pixel variables (canopy height, bands,
+indices, seasonal change, point-cloud metrics, orthophoto measures, the conifer index — CHM, NDVI, NDWI, NIR and SWIR
+by default), the number of clusters (2–20) and a seed. Every variable is read at every pixel of the study area (2 m
+where it allows), standardised to z-scores so each counts equally (switchable), and clustered by seeded k-means++ on a
+sample of up to 60 000 pixels; every pixel is then assigned to its nearest centre. Clusters are numbered by their
+centre on the first variable, lowest first, so a rerun with the same seed and inputs gives the same clusters.
+
+The result card lists each cluster's **centre in every variable's own units** and its area, so each can be **named and
+recoloured** from its profile and what you know of the site; the names carry to the map, the Layers legend and both
+downloads (class areas CSV, cluster profiles CSV). It reports the share of variance between clusters (how distinct the
+groups are, not how right) and, per variable, how much of the area it covers: a pixel missing any chosen variable is left
+unclassified, never filled, so a point-cloud metric defined only over vegetation leaves the open ground out. A cluster is
+a statistical group, not a cover type — one cover can split across clusters and two covers can share one — and the
+result is unvalidated. `src/analysis/cluster.ts` (pure, tested) and `clusterRun.ts`.
+
 ## Rule-based classes
 
 A rule set is an ordered list of rules. Each rule has a class name, a colour and conditions on any variable (canopy

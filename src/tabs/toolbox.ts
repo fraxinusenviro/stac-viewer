@@ -25,6 +25,7 @@ import { stretchPanel, type StretchPanel } from '../ui/stretch.ts';
 import { stepHead } from '../ui/steps.ts';
 import { aoiBox } from '../aoi.ts';
 import { pcStatus } from '../pointcloud/pointCloud.ts';
+import { clusterInputs, clusterVariables } from '../analysis/clusterRun.ts';
 import { TOOLS, defaultParams, missingInput, searchTools, toolById, toolTree, type InputKind, type InputSpec, type ParamSpec, type ToolSpec } from '../toolbox/catalog.ts';
 import type { ToolId } from './analysis.ts';
 import { findHrdem } from './rasters.ts';
@@ -169,6 +170,24 @@ export function initToolbox(ctx: Ctx) {
   function paramRow(t: ToolSpec, p: ParamSpec, v: Value): HTMLElement {
     const help = p.help ? h('span', { class: 'muted small' }, p.help) : null;
     if (p.type === 'check') return h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!v, onchange: (e: Event) => setParam(t, p.id, (e.target as HTMLInputElement).checked) }), p.label, help);
+    if (p.type === 'variables') {
+      // A checklist of every pixel variable, grouped; at least `min`, at most `max`.
+      const chosen = new Set(String(v).split(',').filter(Boolean));
+      const groups = new Map<string, typeof DRAWABLE>();
+      for (const x of DRAWABLE) (groups.get(x.group) ?? groups.set(x.group, []).get(x.group)!).push(x);
+      const count = h('span', { class: 'muted small' }, `${chosen.size} chosen`);
+      const list = h('div', { class: 'tb-vars' });
+      for (const [g, vs] of groups) {
+        list.append(h('div', { class: 'tb-vars-group small' }, g));
+        for (const x of vs) list.append(h('label', { class: 'check small' }, h('input', { type: 'checkbox', checked: chosen.has(x.id), onchange: (e: Event) => {
+          if ((e.target as HTMLInputElement).checked) chosen.add(x.id); else chosen.delete(x.id);
+          // Keep the catalogue's order, so the first variable (which numbers the clusters) is stable.
+          setParam(t, p.id, DRAWABLE.filter(y => chosen.has(y.id)).map(y => y.id).join(','));
+          count.textContent = `${chosen.size} chosen${chosen.size < p.min ? ` — choose at least ${p.min}` : chosen.size > p.max ? ` — at most ${p.max}` : ''}`;
+        } }), x.label));
+      }
+      return h('div', { class: 'field' }, h('span', {}, p.label, ' ', count), list, help);
+    }
     if (p.type === 'range') {
       const out = h('output', {}, `${v}${p.unit ? ` ${p.unit}` : ''}`);
       return h('label', { class: 'row' }, `${p.label} `, h('input', {
@@ -193,6 +212,16 @@ export function initToolbox(ctx: Ctx) {
       if (values.method !== 'crowns' && p.id === 'minTreeM') return false;
     }
     return true;
+  }
+
+  /** For a tool clustering on chosen variables: which input the choice needs and is not set, or ''. */
+  function variableInputsMissing(t: ToolSpec, v: Record<string, Value>): string {
+    if (t.id !== 'fusion.cluster' || !shared.workspace) return '';
+    const ids = String(v.variables ?? '').split(',').filter(Boolean);
+    if (!ids.length) return 'Choose at least one variable to cluster on.';
+    if (ids.length > 12) return 'Choose at most 12 variables.';
+    try { resolveInputs(clusterInputs(clusterVariables(ids)), shared.workspace.items()); return ''; }
+    catch (e) { return `The chosen variables need an input that is not set: ${(e as Error).message.replace(/^this product needs /, '')}.`; }
   }
 
   // ── Running ───────────────────────────────────────────────────────────────
@@ -234,6 +263,7 @@ export function initToolbox(ctx: Ctx) {
       const val = v[p.id];
       if (p.type === 'select') return `${p.label}: ${(p.options.length ? p.options : variableOptions()).find(o => o.value === val)?.label ?? val}`;
       if (p.type === 'range') return `${p.label}: ${val}${p.unit ? ` ${p.unit}` : ''}`;
+      if (p.type === 'variables') return `${p.label}: ${String(val).split(',').map(id => variableById.get(id)?.label ?? id).join(', ')}`;
       return `${p.label}: ${val ? 'yes' : 'no'}`;
     }).join(' · ');
   }
@@ -279,7 +309,10 @@ export function initToolbox(ctx: Ctx) {
         const blocked = ws().analysis.blocked(tool);
         if (blocked) throw new Error(blocked);
         note(`${t.name} on "${a.name}"…`);
-        await ws().analysis.runTool(tool, { area: a, segment: t.id === 'fusion.objects' ? segment : undefined, cellM: t.id === 'fusion.table' ? (+v.cellM === 20 ? 20 : 10) : undefined, onDone: () => { page = 'results'; } });
+        const vars = String(v.variables ?? '').split(',').filter(Boolean);
+        if (t.id === 'fusion.cluster' && (vars.length < 1 || vars.length > 12)) throw new Error('choose between 1 and 12 variables to cluster on');
+        const cluster = t.id === 'fusion.cluster' ? { vars, k: +v.k, seed: +v.seed, standardise: !!v.standardise } : undefined;
+        await ws().analysis.runTool(tool, { area: a, segment: t.id === 'fusion.objects' ? segment : undefined, cellM: t.id === 'fusion.table' ? (+v.cellM === 20 ? 20 : 10) : undefined, cluster, onDone: () => { page = 'results'; } });
       } else if (t.runner === 'objects-tab') {
         (document.querySelector('.tab[data-tab="obia"]') as HTMLElement | null)?.click();
         shared.events.dispatchEvent(new CustomEvent('obia-step', { detail: t.fixed!.step }));
@@ -365,7 +398,7 @@ export function initToolbox(ctx: Ctx) {
     // 3 Output
     const s3 = h('section', { class: 'step' }, stepHead(3, 'Output'));
     s3.append(h('ul', { class: 'tb-outs' }, ...t.outputs.map(o => h('li', { class: 'small' }, h('span', { class: 'badge' }, o.kind), ' ', o.label, o.formats ? h('span', { class: 'muted' }, ` — ${o.formats.join(', ')}`) : null))));
-    const why = missingInput(t, k => have(k)) || (t.runner === 'analysis' && shared.workspace ? shared.workspace.analysis.blocked(t.fixed!.tool as ToolId) : '');
+    const why = missingInput(t, k => have(k)) || (t.runner === 'analysis' && shared.workspace ? shared.workspace.analysis.blocked(t.fixed!.tool as ToolId) : '') || variableInputsMissing(t, v);
     const aBusy = shared.workspace?.analysis.busy();
     const label = busy === t.id || aBusy ? 'Running…' : t.runner === 'objects-tab' ? 'Open in the Objects tab' : t.runner === 'analysis' ? `Run on ${area.summary()}` : 'Run (add to the map)';
     s3.append(h('button', { class: 'btn wide', disabled: !!busy || !!aBusy || (!!why && t.runner !== 'objects-tab'), onclick: () => void run(t) }, label));

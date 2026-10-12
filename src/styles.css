@@ -250,3 +250,9 @@ details.panel[open] > summary { margin-bottom: 6px; }
 .tb-input.missing { border-color: #d9a441; }
 .tb-input p { margin: 0; }
 .tb-outs { margin: 0 0 8px; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.cl-table input.cl-name { width: 110px; padding: 3px 5px; font-size: 12px; }
+.cl-table input.cl-colour { width: 26px; height: 22px; padding: 0; border: 0; background: none; }
+.tb-vars { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; background: var(--bg); }
+.tb-vars .tb-vars-group { font-weight: 700; margin-top: 4px; }
+.cl-table td, .cl-table th { white-space: nowrap; }
+.cl-table input.cl-name { width: 96px; }

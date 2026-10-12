@@ -22,7 +22,9 @@ export interface InputSpec { id: string; kind: InputKind; label: string; require
 export type ParamSpec = { id: string; label: string; help?: string } & (
   | { type: 'select'; options: { value: string; label: string }[]; default: string }
   | { type: 'range'; min: number; max: number; step: number; default: number; unit?: string }
-  | { type: 'check'; default: boolean });
+  | { type: 'check'; default: boolean }
+  /** Several fusion variables, as a comma-separated list of ids (the picker lists every pixel variable). */
+  | { type: 'variables'; default: string; min: number; max: number });
 
 export type OutputKind = 'raster' | 'classes' | 'objects' | 'table' | 'workflow';
 export interface OutputSpec { kind: OutputKind; label: string; formats?: string[] }
@@ -195,6 +197,24 @@ export const TOOLS: ToolSpec[] = [
     ],
     outputs: [{ kind: 'objects', label: 'Object layer (Layers panel)' }, { kind: 'table', label: 'Objects with attributes (Results)', formats: ['GeoJSON', 'class areas CSV'] }],
     help: { purpose: 'Patch- or crown-level description of the area for screening.', method: 'SLIC superpixels on CHM + photo, neighbours merged (or crowns grown from CHM maxima); every input averaged per object; object measures (area, compactness, CHM P90 and spread, photo texture).', cautions: 'Sentinel-2 values here are fine-grid samples of 10–20 m pixels. For native-support statistics, training and validation use the Object-based analysis tools.' },
+  },
+  {
+    id: 'fusion.cluster', name: 'Unsupervised classes (k-means)', path: ['LiDAR × imagery fusion', 'Classification'], runner: 'analysis', fixed: { tool: 'cluster' },
+    summary: 'Groups every pixel of the study area into k clusters by the variables you choose — no rules, no labels — for you to name.',
+    inputs: [AREA, { ...LIDAR_DSM, required: false, note: 'Needed by canopy height and the other LiDAR variables.' }, SCENE_OPT, OFF_OPT, ORTHO_OPT, PC_OPT],
+    params: [
+      { id: 'variables', label: 'Variables to cluster on', type: 'variables', default: 'chm,ndvi,ndwi,nir,swir16', min: 1, max: 12, help: 'Each chosen input must be set in Inputs.' },
+      { id: 'k', label: 'Number of clusters', type: 'range', min: 2, max: 20, step: 1, default: 6 },
+      { id: 'standardise', label: 'Standardise the variables (z-scores, so each counts equally)', type: 'check', default: true },
+      { id: 'seed', label: 'Random seed (same seed and inputs, same clusters)', type: 'range', min: 1, max: 99, step: 1, default: 1 },
+    ],
+    outputs: [{ kind: 'classes', label: 'Cluster layer (Layers panel)' }, { kind: 'table', label: 'Cluster profiles and areas (Results) — name and recolour the clusters there', formats: ['class areas CSV', 'cluster profiles CSV'] }],
+    help: {
+      purpose: 'Find the groups the data falls into when you do not yet know the classes, or to check whether the rule-based classes match how the ground actually varies.',
+      method: 'Every chosen variable read at every pixel of the area (2 m where it allows); variables standardised over the area; seeded k-means++ start and Lloyd iterations on a sample of up to 60 000 pixels, then every pixel assigned to its nearest centre. Clusters are numbered by their centre on the first variable, lowest first. A pixel missing any variable is left unclassified, never filled.',
+      reading: 'The result card lists each cluster\'s centre in every variable\'s own units (canopy height in m, NDVI…) and its area: name each from its profile and what you know of the site. The share of variance between clusters says how distinct the groups are — not how correct.',
+      cautions: 'A cluster is a statistical group, not a cover type: one cover can split across clusters (sun and shade, two scene dates) and two covers can share one. The result depends on the variables, k and the seed; try a few k. Pixels mix 10–20 m imagery with 1–2 m LiDAR. Unvalidated.',
+    },
   },
   {
     id: 'fusion.table', name: 'Feature table', path: ['LiDAR × imagery fusion', 'Classification'], runner: 'analysis', fixed: { tool: 'table' },
