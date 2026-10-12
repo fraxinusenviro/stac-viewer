@@ -13,7 +13,8 @@ storage.
 | Point clouds | NRCan CanElevation COPC tiles on S3 | A static GeoParquet tile index (`public/data/`) searched with [hyparquet](https://github.com/hyparam/hyparquet) by HTTP range reads. Only the row groups whose bbox statistics meet the view are read. |
 | Rasters | NRCan datacube STAC (`hrdem-lidar`, `hrdem-mosaic-1m/2m`) | Seven products per source: **DTM** (bare earth) or **DSM** (surface incl. trees and buildings), each as hillshade, elevation or shaded elevation, and the **canopy height model** (DSM − DTM), added as separate layers. The colour ramp is stretched to the view (2nd–98th percentile). COGs in EPSG:3979, range-read with geotiff.js and warped into map tiles in the browser. Projects are filtered by their **true** coverage (`extent` asset), not their STAC envelope. |
 | Imagery | Element 84 Earth Search, `sentinel-2-c1-l2a` | True colour (TCI), natural colour, false colour IR, agriculture, SWIR and geology composites; NDVI, EVI, SAVI, GNDVI, NDRE, NDMI, NDWI, MNDWI, NBR and NDBI; SCL classes; any single band; custom RGB. Per-channel histogram with 2–98 % / Min/Max, curve (linear, square root, log), gamma and nodata, as in the reference explorer. Values are **reflectance**, from each asset's STAC `raster:bands` scale and offset (the baseline ≥ 04.00 BOA offset included). |
-| Objects | RGB + LiDAR objects, Sentinel-2 at native support | **Object-based image analysis of a study area** (below and [docs/OBIA.md](docs/OBIA.md)). |
+| Objects | RGB + LiDAR objects, Sentinel-2 and LiDAR returns at native support | **Object-based image analysis of a study area** (below and [docs/OBIA.md](docs/OBIA.md)). |
+| Toolbox | Every analysis | Toolboxes › toolsets › tools, each stating its **inputs, parameters and outputs**; outputs go to the map's **Layers panel**, a table of contents with drag reordering (below). |
 | Fusion | Both of the above, per pixel | **Rule-based classes** from a rule set you edit (below), the **structure · greenness · water** composite (CHM · NDVI · NDWI as RGB), and a **custom fusion RGB** of any variable. An optional **leaf-off scene** adds leaf-off indices and bands and the seasonal change (Δ NDVI, Δ EVI, Δ NIR…). "Find inputs for the study area" picks the newest LiDAR project with a DSM, the clearest leaf-on scene (June–September) and the clearest leaf-off one (late April–mid May, or November) of the last three years. |
 
 The approach follows [taylor-geospatial/s2-stac-geoparquet](https://github.com/taylor-geospatial/s2-stac-geoparquet):
@@ -51,34 +52,58 @@ A six-step workflow — **Study area → Sources → Objects → Training → Cl
 Results are **candidate mapped units**, not regulatory wetland boundaries or confirmed communities. What is and is
 not built, the conventions, tests and measured limits: [docs/OBIA.md](docs/OBIA.md).
 
-## Study areas, analyses and results
+## Toolbox and the Layers panel
 
-The Fusion tab is laid out as FieldMapper's HabLab tools are: two pages, **Set up** and **Results**, and Set up in four
-numbered steps.
+**Toolbox tab.** Every analysis is a tool in one hierarchy — toolboxes › toolsets › tools — searchable, each with an
+ⓘ that states its purpose, method, how to read the result and its cautions (`src/toolbox/catalog.ts`):
+
+| Toolbox | Toolsets and tools |
+|---|---|
+| LiDAR rasters (HRDEM) | Terrain: Hillshade, Elevation, Shaded elevation · Vegetation structure: Canopy height model |
+| Point cloud (CanElevation COPC) | Return metrics: Return metric (intensity, vegetation and ground intensity, penetration, attenuation, density) · Composites: Point-cloud evidence, LiDAR intensity × orthophoto |
+| Sentinel-2 imagery | Band composites · Spectral indices · Scene classification |
+| LiDAR × imagery fusion | Composites: Structure · greenness · water, LiDAR-sharpened false colour, Variable map, Custom fusion RGB · Classification: Class areas, Objects (patches or crowns), Feature table |
+| Object-based analysis (OBIA) | Workflow: Segment and describe objects, Train and classify, Review and export (open the Objects tab at that step) |
+
+A tool opens as a dialog in three numbered steps drawn from its contract: **1 Inputs** (a picker per declared input,
+each marked ready, needed or optional; a missing required input stops Run and says which), **2 Parameters** (defaults
+stated, remembered per tool, *Reset to defaults*), **3 Output** (what it makes and where it goes). LiDAR, scenes,
+orthophoto, point cloud and classes are one **workspace** shared with the Fusion tab: chosen in either, they are the set
+both use. The classification tools run on the Toolbox's own study area; raster tools draw for the map view. Progress and
+outcomes go to a folded run log.
+
+**Results** (the Toolbox's second page) lists the map layers tools made — with their inputs and parameters, *Zoom to*,
+*Open the tool with these settings* and *Remove* — and the analysis results. Analysis results accumulate: every run is a
+card and a map layer (its area outlined), stating what it was made from, with its class table, downloads (class-areas
+CSV, objects GeoJSON, GeoParquet or CSV), **Run again**, **Save area** for a run made on the view, and **Discard**. A
+card whose classes or inputs have changed since says so. With the Toolbox or Fusion tab open, tapping the map inspects
+the topmost visible result. Results live in memory: leaving the page with any not downloaded asks first.
+
+**Layers panel** (top-left of the map). Every output on the map — HRDEM rasters, the Sentinel-2 scene, the Fusion class
+map, every tool output and analysis result, and the Objects tab's rasters as one group — in draw order, top row on
+top. Each row: a drag grip, a visibility switch, the name and where it came from, and a ⋯ menu (Zoom to, Move to top /
+up / down / bottom, Details…, Remove). Tapping the name opens its fold: opacity, and the legend or stretch where the
+output has one. Rows reorder by dragging the grip (pointer events, so it works on a touch screen) or from the keyboard
+(↑ ↓ Home End on the grip); a group moves as a unit and its layers reorder within it. A new output lands on top of its
+own kind (imagery < LiDAR rasters < fusion classes < results < objects) and after that the order is yours. The panel is
+the one place visibility, opacity and order are applied (`src/layers/toc.ts`, model in `tocModel.ts`), so a tab's own
+switches and the panel cannot disagree. Footprints and outlines stay above every output.
+
+## Study areas
+
+The Fusion tab is the workspace the tools read, in three numbered steps:
 
 1. **Study area**: *This view* (the map view when Run is pressed), a *Saved area*, or *Draw* a polygon or rectangle on
-   the map and name it. Areas are kept in this browser, can be renamed, zoomed to, deleted, and imported or exported as
-   GeoJSON. Every analysis reads the area's bounding box and is then **masked to its outline**: an object cut by the
-   outline keeps only its inside part, a cell less than half inside is left out, and nothing outside counts towards a
-   class area. The conifer index is calibrated on the area's woody pixels, and "Find inputs" searches the area.
+   the map and name it. Areas are kept in this browser and shared by every tab's picker, can be renamed, zoomed to,
+   deleted, and imported or exported as GeoJSON. Every analysis reads the area's bounding box and is then **masked to
+   its outline**: an object cut by the outline keeps only its inside part, a cell less than half inside is left out,
+   and nothing outside counts towards a class area. The conifer index is calibrated on the area's woody pixels, and
+   "Find inputs" searches the area.
 2. **Inputs**: LiDAR, leaf-on and leaf-off scenes, orthophoto and point cloud.
 3. **Classes**: strata × cover or rules (or a composite), with the on-screen pixel preview, the conifer index and
    sample comparison.
-4. **Analysis**: one tool at a time from a segmented bar, with its parameters and one Run button naming the area it
-   runs on. A tool that cannot run says why (Class areas needs classes). Progress and outcomes go to a folded **run log**.
-   - **Class areas**: the classes at every pixel of the area (2 m where the area allows, up to ~120 km² at 10 m), with
-     hectares and share per class, and the unclassified remainder.
-   - **Objects**: patches or tree crowns (below).
-   - **Feature table**: one row per Sentinel-2 pixel (below).
 
-A run that produces something switches to **Results**. Results accumulate: every run is a card and a map layer of its
-own (newest on top, its area outlined), so two areas, or one area under two rule sets, sit side by side. A card states
-what the run was made from (area, classes, input dates, time) and its class table, and offers show/hide, opacity, zoom,
-downloads (class-areas CSV, objects GeoJSON, GeoParquet or CSV), **Run again**, **Save area** for a run made on the view,
-and **Discard**. When the classes or inputs change after a run, its card says so and offers to run it again on the same
-area. Tapping the map inspects the topmost visible result. Results live in the tab's memory: a card is marked until it
-is downloaded, and leaving the page with any not downloaded asks first. *Class areas of every run* writes one CSV of
-all of them for comparison.
+Step 4 points to the classification tools in the Toolbox.
 
 ## Strata × cover classes
 

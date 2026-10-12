@@ -41,7 +41,7 @@ import { ORTHO_SERVICES, type XyzService } from '../xyz.ts';
 import { stepHead, segBar } from '../ui/steps.ts';
 import { studyAreaStep } from './studyArea.ts';
 import { obiaToc, addObiaLayers, chmImage, nativeGridLines, objectsImage, pixelOfLonLat, qualityImage, removeImage, rgbImage, setGeoJSON, showImage, type RasterLayer } from './obiaMap.ts';
-import { mapClaim, type Ctx } from './ctx.ts';
+import { mapClaim, shared, type Ctx } from './ctx.ts';
 import { toc } from '../layers/toc.ts';
 
 type Step = 'area' | 'sources' | 'objects' | 'training' | 'classify' | 'review';
@@ -141,6 +141,8 @@ export function initObia(ctx: Ctx) {
   let fixtureLoaded = false;
 
   const setStep = (s: Step) => { step = s; render(); };
+  // The Toolbox's Object-based analysis tools open this tab at their step.
+  shared.events.addEventListener('obia-step', (e) => { const s = (e as CustomEvent).detail as Step; if (STEPS.some(([k]) => k === s)) setStep(s); });
 
   // ── Map ───────────────────────────────────────────────────────────────────
 

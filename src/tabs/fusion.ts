@@ -8,11 +8,11 @@
 // every variable is ranked by how well it separates them (compare.ts), and
 // the best cut becomes a pair of rules in one tap.
 //
-// The tab reads as FieldMapper's HabLab dialogs do: two pages, Set up and
-// Results, and Set up in four numbered steps — 1 the study area (studyArea.ts),
-// 2 the inputs, 3 the classes (and the pixel preview), 4 the analysis to run
-// over the area (analysis.ts). A run lands on the Results page as a card of
-// its own.
+// The tab is the WORKSPACE the analyses run on, in numbered steps — 1 the
+// study area (studyArea.ts), 2 the inputs, 3 the classes (and the pixel
+// preview). It publishes its inputs and classes as `shared.workspace`; the
+// analyses themselves (analysis.ts) are tools in the Toolbox tab, which runs
+// them and shows their results.
 //
 // The inputs are rarely the same date and never the same resolution (1 m
 // LiDAR against 10–20 m imagery); both dates are stated beside the product,
@@ -44,7 +44,7 @@ import { variableOptions } from '../ui/variables.ts';
 import { ORTHO_SERVICES, orthoPhotoYear, orthoService } from '../xyz.ts';
 import { pcStatus } from '../pointcloud/pointCloud.ts';
 import { studyAreaStep } from './studyArea.ts';
-import { analysisStep } from './analysis.ts';
+import { ANALYSIS_TOOLS, analysisStep } from './analysis.ts';
 import { stepHead } from '../ui/steps.ts';
 import { aoiBox, polygonMask } from '../aoi.ts';
 import { fmtBytes, fmtCount } from '../dom.ts';
@@ -104,7 +104,6 @@ export function initFusion(ctx: Ctx) {
   let samples = stored.samples;
   let sampling: string | null = null;
   let showAllRows = false;
-  let page: 'setup' | 'results' = 'setup';
   const setSampling = (v: string | null) => {
     sampling = v;
     if (v) mapClaim.owner = 'sample'; else if (mapClaim.owner === 'sample') mapClaim.owner = null;
@@ -127,10 +126,10 @@ export function initFusion(ctx: Ctx) {
   // ── Inputs ────────────────────────────────────────────────────────────────
 
   /** The newest LiDAR source with a DSM, the clearest leaf-on scene and the clearest snow-free leaf-off one, for the study area. */
-  async function findInputs() {
-    say(`Finding LiDAR, a leaf-on scene and a leaf-off scene for ${area.summary()}…`);
+  async function findInputs(box?: [number, number, number, number], where?: string) {
+    say(`Finding LiDAR, a leaf-on scene and a leaf-off scene for ${where ?? area.summary()}…`);
     try {
-      const vb = areaBox();
+      const vb = box ?? areaBox();
       const y = new Date().getFullYear(), years = [y, y - 1, y - 2];
       const search = (windows: [string, string][]) => Promise.all(windows.map(([from, to]) => searchS2({ bbox: vb, from, to, maxCloud: 10, limit: 50 }).catch(() => []))).then(r => r.flat());
       const clearest = (xs: S2Item[]) => [...xs].sort((a, b) => ((a.nodata ?? 0) > 5 ? 1 : 0) - ((b.nodata ?? 0) > 5 ? 1 : 0) || (a.cloud ?? 100) - (b.cloud ?? 100))[0];
@@ -181,7 +180,7 @@ export function initFusion(ctx: Ctx) {
         legend: () => p.classes?.length ? h('ul', { class: 'toc-legend' }, ...p.classes.slice(0, 40).map(c => h('li', {}, h('span', { class: 'swatch', style: `--c:${c.colour}` }), c.label))) : null,
         onRemove: () => { hideLayer(map, LAYER); shown = false; panel = null; render(); },
         onOpacity: (o) => { opacity = o; render(); },
-        details: () => { (document.querySelector('.tab[data-tab="fusion"]') as HTMLElement | null)?.click(); page = 'setup'; render(); },
+        details: () => { (document.querySelector('.tab[data-tab="fusion"]') as HTMLElement | null)?.click(); render(); },
       });
       const st = style;
       panel = stretchPanel({ product: p, style: st, stats: () => viewStats(LAYER, ctx.viewBox()), apply: () => restyle(map, LAYER, st) });
@@ -380,8 +379,38 @@ export function initFusion(ctx: Ctx) {
       ].filter(Boolean).join(' · ') + '.';
     },
     render: () => render(),
-    showResults: () => { page = 'results'; render(); pane.scrollTop = 0; },
+    showResults: () => openToolbox('results'),
   });
+  const openToolbox = (page: 'results' | string) => {
+    (document.querySelector('.tab[data-tab="toolbox"]') as HTMLElement | null)?.click();
+    shared.events.dispatchEvent(new CustomEvent('toolbox-open', { detail: page }));
+  };
+
+  shared.workspace = {
+    items,
+    ids: () => ({ lidar: lidarId, scene: sceneId, off: offId, ortho: orthoId, pc: usePc }),
+    set: (patch) => {
+      if (patch.lidar !== undefined) lidarId = patch.lidar;
+      if (patch.scene !== undefined) sceneId = patch.scene;
+      if (patch.off !== undefined) offId = patch.off;
+      if (patch.ortho !== undefined) { orthoId = patch.ortho; photoYear = ''; }
+      if (patch.pc !== undefined) usePc = patch.pc;
+      saveSources();
+      if (shown) void draw(false); else render();
+    },
+    lidarChoices,
+    scenes: () => allScenes().sort((a, b) => b.datetime.localeCompare(a.datetime)),
+    orthoServices: () => ORTHO_SERVICES.filter(o => o.access !== 'reference-only'),
+    findInputs: (box) => findInputs(box, 'the toolbox\'s study area'),
+    classProduct,
+    sources: (inputs) => resolveInputs([...new Set([...inputs, ...standardInputs()])], items()),
+    provenance: () => {
+      const l = lidar(), sc = scene(), o = offScene(), svc = orthoService(orthoId);
+      return [l ? `LiDAR ${itemName(l)}${l.datetime ? ` ${fmtDate(l.datetime)}` : ''}` : 'no LiDAR', sc ? `leaf-on ${fmtDate(sc.datetime)}` : 'no scene', o ? `leaf-off ${fmtDate(o.datetime)}` : '', svc ? `orthophoto ${svc.label}` : '', usePc ? 'point cloud' : ''].filter(Boolean).join(' · ') + '.';
+    },
+    openClasses: () => { (document.querySelector('.tab[data-tab="fusion"]') as HTMLElement | null)?.click(); render(); document.getElementById('fusion-classes')?.scrollIntoView({ block: 'start' }); },
+    analysis: an,
+  };
 
   // ── Rendering ─────────────────────────────────────────────────────────────
 
@@ -510,12 +539,8 @@ export function initFusion(ctx: Ctx) {
     clear(el);
     // Drawing a study area takes the map's taps; sampling stops rather than fight over them.
     if (mapClaim.owner === 'aoi' && sampling) sampling = null;
-    const nRes = an.count(), open = an.unanswered();
-    el.append(h('div', { class: 'subtabs', role: 'tablist' },
-      h('button', { class: `subtab${page === 'setup' ? ' on' : ''}`, role: 'tab', 'aria-selected': String(page === 'setup'), onclick: () => { page = 'setup'; render(); } }, 'Set up'),
-      h('button', { class: `subtab${page === 'results' ? ' on' : ''}`, role: 'tab', 'aria-selected': String(page === 'results'), onclick: () => { page = 'results'; render(); } },
-        'Results', nRes ? h('span', { class: `subtab-n${open ? ' open' : ''}`, title: open ? `${open} not downloaded` : 'All downloaded' }, String(nRes)) : null)));
-    if (page === 'results') { el.append(an.resultsEl()); return; }
+    // The Toolbox reads this tab's inputs and classes: tell it they may have changed.
+    queueMicrotask(() => shared.workspaceChanged());
 
     const section = (n: number, title: string, right?: Node | string | null) => {
       const sec = h('section', { class: 'step' }, stepHead(n, title, right));
@@ -529,6 +554,7 @@ export function initFusion(ctx: Ctx) {
     s2.append(h('button', { class: 'btn ghost wide', onclick: () => void findInputs() }, 'Find inputs for the study area'), renderInputs());
 
     const s3 = section(3, 'Classes', mode === 'strata' || mode === 'rules' ? null : 'none — a composite');
+    s3.id = 'fusion-classes';
     s3.append(h('label', { class: 'field' }, 'Classes or composite', h('select', { onchange: (e: Event) => { mode = (e.target as HTMLSelectElement).value as typeof mode; if (shown) void draw(true); else render(); } },
       h('option', { value: 'strata', selected: mode === 'strata' }, 'Strata × cover classes (editable)'),
       h('option', { value: 'rules', selected: mode === 'rules' }, 'Rule-based classes (editable)'),
@@ -581,7 +607,12 @@ export function initFusion(ctx: Ctx) {
     s3.append(renderConiferIndex());
     s3.append(renderSamples());
 
-    section(4, 'Analysis').append(an.setupEl());
+    const nRes = an.count();
+    section(4, 'Analysis').append(h('div', { class: 'step-body' },
+      h('p', { class: 'muted small' }, 'The analyses that run on these inputs and classes — Class areas, Objects (patches or tree crowns) and the Feature table — are tools in the Toolbox, under LiDAR × imagery fusion ▸ Classification, each with its inputs, parameters and outputs stated. Their results are on the Toolbox\'s Results page and in the map\'s Layers panel.'),
+      h('div', { class: 'row' },
+        ...ANALYSIS_TOOLS.map(t => h('button', { class: 'chip', onclick: () => openToolbox(`fusion.${t.id}`) }, `${t.name}…`)),
+        h('button', { class: 'chip', onclick: () => openToolbox('results') }, `Results${nRes ? ` (${nRes})` : ''}`))));
   }
 
   render();

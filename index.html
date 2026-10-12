@@ -20,6 +20,7 @@
         <button class="tab" role="tab" data-tab="img" aria-selected="false">Imagery</button>
         <button class="tab" role="tab" data-tab="fusion" aria-selected="false">Fusion</button>
         <button class="tab" role="tab" data-tab="obia" aria-selected="false" title="Object-based image analysis">Objects</button>
+        <button class="tab" role="tab" data-tab="toolbox" aria-selected="false" title="Every analysis tool: inputs, parameters, outputs">Toolbox</button>
       </nav>
 
       <section class="pane" id="pane-pc">
@@ -55,6 +56,11 @@
       <section class="pane" id="pane-obia" hidden>
         <p class="muted small">Object-based analysis of a study area: fine objects from RGB and LiDAR, Sentinel-2 as native-resolution context, a Random Forest trained on your labels and checked on spatially separate folds. Results are candidate mapped units, not regulatory boundaries.</p>
         <div id="obia-body"></div>
+      </section>
+
+      <section class="pane" id="pane-toolbox" hidden>
+        <p class="muted small">Every analysis as a tool: LiDAR rasters, point-cloud metrics, Sentinel-2 products, LiDAR × imagery fusion and object-based analysis. Each tool states its inputs, parameters and outputs; what it makes goes to the map's Layers panel and to Results.</p>
+        <div id="toolbox-body"></div>
       </section>
 
       <footer>

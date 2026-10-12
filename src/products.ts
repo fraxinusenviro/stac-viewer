@@ -513,3 +513,14 @@ export function seedRanges(p: Product, current: [number, number][], stats: ({ p2
     return [lo, s.p98 > lo ? s.p98 : lo + c.step];
   });
 }
+
+const VARIABLE_RAMP = ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'];
+
+/** Any one fusion variable as a colour ramp (the toolbox's "Variable map"). */
+export function variableProduct(v: Variable): Product {
+  return {
+    id: `var:${v.id}`, label: v.label, group: 'Variable', inputs: v.inputs, render: 'ramp', ramp: VARIABLE_RAMP,
+    channels: [v.sharpenKeys ? { ...v.channel } : v.channel], pad: 0, sharpen: v.sharpenKeys ? sharpeningFor([v]) : undefined,
+    note: `${v.label}${v.channel.unit ? ` (${v.channel.unit})` : ''}, stretched over the view's 2nd–98th percentile.`,
+  };
+}

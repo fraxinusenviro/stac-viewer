@@ -21,7 +21,8 @@ const GLYPH: Record<string, string> = { raster: '▦', classes: '▣', objects: 
 export class TocPanel implements IControl {
   private el = h('div', { class: 'maplibregl-ctrl toc' });
   private body = h('div', { class: 'toc-body' });
-  private open = (() => { try { return localStorage.getItem(LS_OPEN) !== '0'; } catch { return true; } })();
+  /** Folded by default on a phone, where the map is half the screen; then as last left. */
+  private open = (() => { try { const v = localStorage.getItem(LS_OPEN); return v === null ? innerWidth > 760 : v !== '0'; } catch { return innerWidth > 760; } })();
   private folded = new Set<string>();
   private menuFor: string | null = null;
   private drag: { id: string; startY: number; rowH: number; from: number; to: number; list: string[]; rowEl: HTMLElement } | null = null;
@@ -52,9 +53,10 @@ export class TocPanel implements IControl {
       head.append(h('button', { class: 'toc-mini', title: allOn ? 'Hide every output' : 'Show every output', onclick: () => { for (const id of [...t.state.order]) t.setVisible(id, !allOn); } }, allOn ? 'Hide all' : 'Show all'));
     }
     this.el.append(head);
-    if (!this.open) return;
+    // Empty, the panel is its header alone (with a tooltip saying what will appear).
+    head.title = n ? '' : 'Every raster, scene, class map, tool output and object layer you add is listed here, top row on top: drag the grip to reorder.';
+    if (!this.open || !n) return;
     clear(this.body);
-    if (!n) this.body.append(h('p', { class: 'muted small toc-empty' }, 'Nothing on the map yet. Every raster, scene, class map, analysis result and object layer you add is listed here, top row on top: drag the grip to reorder.'));
     for (const { node, depth } of rows(t.state)) this.body.append(this.row(node, depth));
     this.el.append(this.body);
   }

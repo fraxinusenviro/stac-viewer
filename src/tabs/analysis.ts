@@ -55,7 +55,7 @@ export interface AnalysisHost {
 }
 
 interface ToolDef { id: ToolId; name: string; blurb: string }
-const TOOLS: ToolDef[] = [
+export const ANALYSIS_TOOLS: ToolDef[] = [
   { id: 'areas', name: 'Class areas', blurb: 'The classes of step 3 evaluated at every pixel of the study area (2 m wherever the area allows), with the hectares and share of each. The on-screen legend only ever counts the view, off overview pixels; this is the figure for the area.' },
   { id: 'objects', name: 'Objects', blurb: 'Splits the study area into objects on canopy height and the orthophoto (superpixels, then neighbours merged — or individual tree crowns), averages every input over each object, adds object measures (area, compactness, canopy-height P90 and spread, photo texture) and classifies each object with the classes of step 3. Objects cut by the area\'s outline keep only their inside part. A screening tool: Sentinel-2 values here are fine-grid samples of 10–20 m pixels; for native-support statistics, training and validation use the Objects tab.' },
   { id: 'table', name: 'Feature table', blurb: "One row per cell of Sentinel-2's own pixel grid (the imagery is never resampled), one column per variable: every finer input averaged into the cell, canopy-height P90 and spread, photo texture, the share of the cell in each class of step 3, and H3 ids. Cells less than half inside the area are left out. GeoParquet or CSV." },
@@ -93,10 +93,23 @@ const fmt = (x: number) => (!Number.isFinite(x) ? '—' : Math.abs(x) >= 100 ? x
 const hex = (c: string) => [1, 3, 5].map(k => parseInt(c.slice(k, k + 2), 16));
 const NO_STYLE = () => defaultStyle({ channels: [] } as unknown as Product);
 
+/** How a run is asked for from outside the step (the Toolbox). */
+export interface RunOptions {
+  /** The ground to run on (else the step's own study area). */
+  area?: Aoi;
+  segment?: SegmentParams;
+  cellM?: 10 | 20;
+  /** Instead of switching the Fusion tab to its Results page. */
+  onDone?: () => void;
+}
+
 export function analysisStep(host: AnalysisHost) {
   const { map, say } = host.ctx;
+  /** 'change' whenever a result is added, changed or discarded, or a run starts or ends. */
+  const events = new EventTarget();
+  const rerender = () => { host.render(); events.dispatchEvent(new Event('change')); };
   let tool: ToolId = load<ToolId>(LS_TOOL, 'areas');
-  if (!TOOLS.some(t => t.id === tool)) tool = 'areas';
+  if (!ANALYSIS_TOOLS.some(t => t.id === tool)) tool = 'areas';
   let segParams: SegmentParams = { ...DEFAULT_SEGMENT, ...load<Partial<SegmentParams>>(LS_SEGMENT, {}) };
   let cellM: 10 | 20 = load<number>(LS_CELL, 10) === 20 ? 20 : 10;
   let results: Result[] = [];
@@ -190,8 +203,8 @@ export function analysisStep(host: AnalysisHost) {
       visible: r.visible, opacity: r.opacity,
       legend: () => r.tally?.rows.length ? h('ul', { class: 'toc-legend' }, ...r.tally.rows.map(row => h('li', {}, h('span', { class: 'swatch', style: `--c:${row.colour}` }), `${row.label} · ${fmtArea(row.areaM2)}`))) : r.tool === 'table' ? h('p', { class: 'muted small' }, r.range) : null,
       details: () => host.showResults(),
-      onVisible: (v) => { r.visible = v; paintAreas(); host.render(); },
-      onOpacity: (o) => { r.opacity = o; host.render(); },
+      onVisible: (v) => { r.visible = v; paintAreas(); rerender(); },
+      onOpacity: (o) => { r.opacity = o; rerender(); },
       onRemove: () => discard(r),
       removeLabel: 'Discard result',
       removeConfirm: r.downloaded ? undefined : `Discard #${r.id} ${def.name}? It has not been downloaded.`,
@@ -221,7 +234,7 @@ export function analysisStep(host: AnalysisHost) {
 
   // ── Running ───────────────────────────────────────────────────────────────
 
-  const toolDef = (id: ToolId) => TOOLS.find(t => t.id === id)!;
+  const toolDef = (id: ToolId) => ANALYSIS_TOOLS.find(t => t.id === id)!;
 
   /** Why a tool cannot run now, or ''. */
   function blocked(id: ToolId): string {
@@ -237,16 +250,16 @@ export function analysisStep(host: AnalysisHost) {
     return tallyClasses(classOf, r.mask, r.product.classes, r.grid.cellM * r.grid.cellM);
   }
 
-  async function run(id: ToolId, again?: Result) {
+  async function run(id: ToolId, again?: Result, opts: RunOptions = {}) {
     if (busy) return;
     const why = blocked(id);
     if (why) { note(why, 'error'); return; }
-    const pick = again ? { aoi: again.area } : host.area.current();
+    const pick = again ? { aoi: again.area } : opts.area ? { aoi: opts.area, reason: '' } : host.area.current();
     if (!pick.aoi) { note(pick.reason, 'error'); return; }
     const area = pick.aoi;
     const def = toolDef(id);
     busy = { tool: id, area: area.name };
-    host.render();
+    rerender();
     const stage = (m: string) => { note(m); if (busyLine) busyLine.textContent = m; };
     note(`${def.name} on "${area.name}" (${fmtArea(aoiAreaM2(area.geometry))}) started.`);
     const t0 = performance.now();
@@ -260,11 +273,11 @@ export function analysisStep(host: AnalysisHost) {
         const data = await runClassAreas(area.geometry, sources, product!, style!, stage);
         r = { ...base, tool: 'areas', data, tally: data.tally, ms: performance.now() - t0 };
       } else if (id === 'objects') {
-        const params = again?.tool === 'objects' ? again.params : { ...segParams };
+        const params = again?.tool === 'objects' ? again.params : { ...(opts.segment ?? segParams) };
         const data = await segmentView(area.geometry, sources, product, style, params, stage);
         r = { ...base, tool: 'objects', data, params, fill: again?.tool === 'objects' ? again.fill : true, tally: objectTally(data), ms: performance.now() - t0 };
       } else {
-        const cell = again?.tool === 'table' ? again.cellM : cellM;
+        const cell = again?.tool === 'table' ? again.cellM : opts.cellM ?? cellM;
         const data = await buildFeatureTable(area.geometry, sources, cell, product, style, stage);
         r = { ...base, tool: 'table', data, cellM: cell, column: again?.tool === 'table' ? again.column : 'chm', range: '', tally: null, ms: performance.now() - t0 };
       }
@@ -276,11 +289,11 @@ export function analysisStep(host: AnalysisHost) {
       paintAreas();
       note(`#${r.id} ${def.name} on "${area.name}": ${summary(r)} in ${(r.ms / 1000).toFixed(1)} s.`, 'ok');
       busy = null;
-      host.showResults();
+      if (opts.onDone) { opts.onDone(); events.dispatchEvent(new Event('change')); } else { host.showResults(); events.dispatchEvent(new Event('change')); }
     } catch (e) {
       note(`${def.name} on "${area.name}" failed: ${(e as Error).message}.`, 'error');
       busy = null;
-      host.render();
+      rerender();
     }
   }
 
@@ -308,7 +321,7 @@ export function analysisStep(host: AnalysisHost) {
   }
 
   map.on('click', (e: MapMouseEvent) => {
-    if (mapClaim.owner || document.getElementById('pane-fusion')!.hidden) return;
+    if (mapClaim.owner || (document.getElementById('pane-fusion')!.hidden && document.getElementById('pane-toolbox')?.hidden !== false)) return;
     const { lng, lat } = e.lngLat;
     for (const r of [...results].reverse()) {
       if (!r.visible || !pointInAoi(r.area.geometry, lng, lat)) continue;
@@ -372,7 +385,7 @@ export function analysisStep(host: AnalysisHost) {
         note(`Downloaded ${r.data.rows.length.toLocaleString()} cells.`, 'ok');
       } else return;
       r.downloaded = true;
-      host.render();
+      rerender();
     } catch (e) { note(`Could not write: ${(e as Error).message}`, 'error'); }
   }
 
@@ -381,14 +394,14 @@ export function analysisStep(host: AnalysisHost) {
     const csv = withTally.map((r, k) => classAreasCsv(r.tally!, { run: runLabel(r), area: r.area.name, product: r.productLabel ?? '' }, k === 0)).join('\n');
     save('class_areas_all_runs.csv', csv, 'text/csv');
     withTally.forEach(r => { if (r.tool === 'areas') r.downloaded = true; });
-    host.render();
+    rerender();
   }
 
   function discard(r: Result) {
     undraw(r);
     results = results.filter(x => x !== r);
     paintAreas();
-    host.render();
+    rerender();
   }
 
   const unanswered = () => results.filter(r => !r.downloaded).length;
@@ -398,7 +411,7 @@ export function analysisStep(host: AnalysisHost) {
 
   function setupEl(): HTMLElement {
     const wrap = h('div', { class: 'step-body' });
-    wrap.append(segBar('Analysis', TOOLS.map(t => ({ value: t.id, label: t.name, disabled: blocked(t.id) || undefined })), tool, v => { tool = v as ToolId; store(LS_TOOL, tool); host.render(); }));
+    wrap.append(segBar('Analysis', ANALYSIS_TOOLS.map(t => ({ value: t.id, label: t.name, disabled: blocked(t.id) || undefined })), tool, v => { tool = v as ToolId; store(LS_TOOL, tool); rerender(); }));
     const why = blocked(tool);
     wrap.append(h('p', { class: 'muted small' }, toolDef(tool).blurb));
     if (tool === 'objects') wrap.append(...segmentParamsEl());
@@ -436,7 +449,7 @@ export function analysisStep(host: AnalysisHost) {
       }), out);
     };
     const els: HTMLElement[] = [
-      segBar('Objects', [{ value: 'patches', label: 'Patches' }, { value: 'crowns', label: 'Tree crowns' }], segParams.method, v => { segParams = { ...segParams, method: v as SegmentParams['method'] }; persist(); host.render(); }),
+      segBar('Objects', [{ value: 'patches', label: 'Patches' }, { value: 'crowns', label: 'Tree crowns' }], segParams.method, v => { segParams = { ...segParams, method: v as SegmentParams['method'] }; persist(); rerender(); }),
       h('label', { class: 'row' }, 'Object height ', h('select', { class: 'grow', 'aria-label': 'Object height', onchange: (e: Event) => { segParams = { ...segParams, heightStat: (e.target as HTMLSelectElement).value as SegmentParams['heightStat'] }; persist(); } },
         h('option', { value: 'mean', selected: segParams.heightStat === 'mean' }, 'Mean canopy height'),
         h('option', { value: 'p90', selected: segParams.heightStat === 'p90' }, '90th percentile (the canopy, not its gaps)'))),
@@ -465,7 +478,7 @@ export function analysisStep(host: AnalysisHost) {
     const def = toolDef(r.tool);
     const el = h('div', { class: `res-card${r.visible ? '' : ' res-hidden'}` });
     el.append(h('div', { class: 'row res-head' },
-      h('button', { class: 'icon', 'aria-pressed': String(r.visible), title: r.visible ? 'Hide on the map' : 'Show on the map', 'aria-label': r.visible ? 'Hide on the map' : 'Show on the map', onclick: () => { setVisible(r, !r.visible); host.render(); } }, r.visible ? '◉' : '○'),
+      h('button', { class: 'icon', 'aria-pressed': String(r.visible), title: r.visible ? 'Hide on the map' : 'Show on the map', 'aria-label': r.visible ? 'Hide on the map' : 'Show on the map', onclick: () => { setVisible(r, !r.visible); rerender(); } }, r.visible ? '◉' : '○'),
       h('span', { class: 'grow res-title' }, h('strong', {}, `#${r.id} ${def.name}`), ' ', h('span', { class: 'muted' }, `· ${r.area.name}`)),
       h('span', { class: 'muted small' }, r.at.toTimeString().slice(0, 5)),
       r.downloaded ? h('span', { class: 'badge ok', title: 'Downloaded' }, '✓') : h('span', { class: 'badge', title: 'Not downloaded yet' }, 'new')));
@@ -478,7 +491,7 @@ export function analysisStep(host: AnalysisHost) {
     if (r.tool === 'objects') el.append(h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: r.fill, onchange: (e: Event) => { r.fill = (e.target as HTMLInputElement).checked; draw(r); } }), 'Fill by class (else outlines only)'));
     if (r.tool === 'table') {
       const t = r.data;
-      el.append(h('label', { class: 'field' }, 'Show column on the map', h('select', { onchange: (e: Event) => { r.column = (e.target as HTMLSelectElement).value; draw(r); host.render(); } },
+      el.append(h('label', { class: 'field' }, 'Show column on the map', h('select', { onchange: (e: Event) => { r.column = (e.target as HTMLSelectElement).value; draw(r); rerender(); } },
         ...[...t.columns, ...t.shares].map(c => h('option', { value: c.name, selected: c.name === r.column }, c.label)))));
       const stops = VIRIDIS.map((c, i) => `${c} ${(i / (VIRIDIS.length - 1)) * 100}%`).join(',');
       el.append(h('div', { class: 'ramp' }, h('div', { class: 'ramp-bar', style: `background: linear-gradient(to right, ${stops})` })), h('p', { class: 'muted small' }, r.range));
@@ -496,7 +509,7 @@ export function analysisStep(host: AnalysisHost) {
       const saved = host.area.save(r.area, name);
       for (const x of results) if (x.area.id === r.area.id) x.area = saved;
       note(`Saved "${saved.name}" as a study area.`, 'ok');
-      host.render();
+      rerender();
     } }, 'Save area'));
     if (!stale) actions.append(h('button', { class: 'chip', disabled: !!busy, title: 'Run the same tool and parameters on this area again', onclick: () => void run(r.tool, r) }, 'Run again'));
     actions.append(h('button', { class: 'chip danger', onclick: () => discard(r) }, 'Discard'));
@@ -514,8 +527,8 @@ export function analysisStep(host: AnalysisHost) {
     wrap.append(h('p', { class: 'small' }, `Each run is kept as its own layer, newest on top; tap the map to inspect what is under it. Results live in this tab until you leave: download what you need. ${open ? `${open} not downloaded yet.` : 'All downloaded.'}`));
     const head = h('div', { class: 'row' });
     if (results.filter(r => r.tally).length > 1) head.append(h('button', { class: 'chip', onclick: downloadAllAreas }, 'Class areas of every run (CSV)'));
-    head.append(h('button', { class: 'chip', onclick: () => { const on = !results.every(r => r.visible); results.forEach(r => setVisible(r, on)); host.render(); } }, results.every(r => r.visible) ? 'Hide all' : 'Show all'));
-    head.append(h('button', { class: 'chip danger', onclick: () => { if (open && !confirm(`Discard every result? ${open} ha${open === 1 ? 's' : 've'} not been downloaded.`)) return; for (const r of results) undraw(r); results = []; paintAreas(); host.render(); } }, 'Discard all'));
+    head.append(h('button', { class: 'chip', onclick: () => { const on = !results.every(r => r.visible); results.forEach(r => setVisible(r, on)); rerender(); } }, results.every(r => r.visible) ? 'Hide all' : 'Show all'));
+    head.append(h('button', { class: 'chip danger', onclick: () => { if (open && !confirm(`Discard every result? ${open} ha${open === 1 ? 's' : 've'} not been downloaded.`)) return; for (const r of results) undraw(r); results = []; paintAreas(); rerender(); } }, 'Discard all'));
     wrap.append(head);
     for (const r of [...results].reverse()) wrap.append(card(r));
     return wrap;
@@ -524,6 +537,12 @@ export function analysisStep(host: AnalysisHost) {
   return {
     setupEl,
     resultsEl,
+    events,
+    /** Run a tool from outside the step (the Toolbox), on an explicit area and parameters. */
+    runTool: (id: ToolId, opts: RunOptions) => run(id, undefined, opts),
+    blocked,
+    busy: () => busy,
+    log: () => log as readonly LogLine[],
     count: () => results.length,
     unanswered,
     isBusy: () => !!busy,

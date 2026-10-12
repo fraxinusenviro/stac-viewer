@@ -226,3 +226,27 @@ details.panel[open] > summary { margin-bottom: 6px; }
 .toc-legend li { display: flex; align-items: center; gap: 6px; }
 .toc-legend .swatch { margin-top: 0; }
 @media (max-width: 760px) { .maplibregl-ctrl.toc { width: min(280px, calc(100vw - 70px)); } }
+
+/* ── Toolbox (tabs/toolbox.ts) ── */
+.tb-search { width: 100%; margin: 4px 0 8px; }
+.tb-list { display: flex; flex-direction: column; gap: 6px; }
+.tb-box { border: 1px solid var(--line); border-radius: 10px; background: var(--bg); overflow: hidden; }
+.tb-box-head { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 40px; border: 0; background: transparent; color: var(--text); font: inherit; font-weight: 700; text-align: left; padding: 0 10px; cursor: pointer; }
+.tb-box.open > .tb-box-head { border-bottom: 1px solid var(--line); }
+.tb-set { padding: 4px 8px 6px; }
+.tb-set-head { text-transform: uppercase; letter-spacing: 0.04em; font-weight: 700; margin: 4px 2px; }
+.tb-tool { border-radius: 8px; padding: 2px 0; }
+.tb-tool + .tb-tool { border-top: 1px solid var(--line); }
+.tb-tool-line { flex-wrap: nowrap; align-items: flex-start; }
+.tb-tool-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; border: 0; background: transparent; color: var(--text); font: inherit; text-align: left; padding: 6px 4px; cursor: pointer; border-radius: 6px; }
+.tb-tool-name:hover { background: var(--panel); }
+.tb-tool-sum { line-height: 1.3; }
+.tb-why { margin: 0 4px 4px; }
+.tb-help { padding: 4px 6px 6px; display: flex; flex-direction: column; gap: 4px; }
+.tb-help p { margin: 0; }
+.tb-title { font-size: 15px; margin: 8px 0 2px; }
+.tb-dialog { display: flex; flex-direction: column; gap: 6px; }
+.tb-input { border: 1px solid var(--line); border-radius: 10px; background: var(--bg); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.tb-input.missing { border-color: #d9a441; }
+.tb-input p { margin: 0; }
+.tb-outs { margin: 0 0 8px; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
