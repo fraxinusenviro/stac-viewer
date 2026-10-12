@@ -253,7 +253,7 @@ const sigOf = (d: LayerDef) => JSON.stringify([d.product.pad, Object.entries(d.s
  * per tile) and returns the union of their lon/lat bounds.
  */
 export async function setLayer(id: string, def: LayerDef): Promise<LonLatBox> {
-  const missing = def.product.inputs.filter(k => !def.sources[k]);
+  const missing = def.product.inputs.filter(k => !def.sources[k] && !k.startsWith('obj:'));
   if (missing.length) throw new Error(`no source for ${missing.join(', ')}`);
   const opened = await Promise.all([...new Set(Object.values(def.sources).filter(isCog).map(s => s.url))].map(openFile));
   const b = opened.map(f => f.bounds);
@@ -402,6 +402,11 @@ export async function samplePoint(sources: Record<string, InputSource>, lon: num
     out[k] = cnt ? sum / cnt : NaN;
   }
   return out;
+}
+
+/** Every plane of a set of inputs over any output grid (segmentation). */
+export function sampleGrid(sources: Record<string, InputSource>, grid: OutGrid, sharpen?: { keys: string[]; params: UnmixParams }): Promise<Planes> {
+  return planesFor(sources, grid, sharpen);
 }
 
 /** Every plane of a set of inputs over a view, on a ~256 px grid (for calibrations). */

@@ -36,6 +36,8 @@ export function resolveInputs(inputs: string[], items: InputItems, opts: SourceO
   const out: Record<string, InputSource> = {};
   for (const key of inputs) {
     const [kind, rest] = key.split(':');
+    // Object measures are computed by segmentation, never read from a source.
+    if (kind === 'obj') continue;
     if (kind === 's2' || kind === 's2b') {
       const scene = kind === 's2' ? items.s2 : items.s2b;
       if (!scene) throw new Error(kind === 's2' ? 'this product needs a Sentinel-2 scene' : 'this product needs a leaf-off scene');

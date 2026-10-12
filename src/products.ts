@@ -369,7 +369,21 @@ export const ORTHO_VARIABLES: Variable[] = ([
   { id: 'o_b', label: 'Ortho blue', inputs: ['ortho:b'], channel: { ...plane('ortho:b', 'Ortho blue', 'DN', 1), seed: [0, 255] } },
 ] as Omit<Variable, 'group'>[]).map(v => ({ ...v, group: 'Orthophoto (RGB)' }));
 
-FUSION_VARIABLES.push(...PC_VARIABLES, ...ORTHO_VARIABLES, ...coniferVariables());
+/**
+ * Measures of a SEGMENT, not a pixel (segment/objects.ts): they have values
+ * only when a product is classified per object ("Segment this view"); on the
+ * pixel map they are missing, so a condition on one is false there.
+ */
+const objPlane = (key: string, label: string, unit: string, step: number): Channel => ({ label, unit, step, seed: 'p2p98', fn: (p, i) => p[key]?.[i] ?? NaN });
+export const OBJECT_VARIABLES: Variable[] = ([
+  { id: 'obj_area', label: 'Object area (m²)', inputs: ['obj:area'], channel: objPlane('obj:area', 'Object area', 'm²', 1) },
+  { id: 'obj_compact', label: 'Object compactness (1 = disc)', inputs: ['obj:compact'], channel: objPlane('obj:compact', 'Compactness', '', 0.01) },
+  { id: 'obj_chm_p90', label: 'Object canopy height, 90th percentile', inputs: ['obj:chm_p90'], channel: objPlane('obj:chm_p90', 'Canopy height P90', 'm', 0.5) },
+  { id: 'obj_chm_sd', label: 'Object canopy height spread (s.d.)', inputs: ['obj:chm_sd'], channel: objPlane('obj:chm_sd', 'Canopy height s.d.', 'm', 0.1) },
+  { id: 'obj_tex', label: 'Object photo texture (brightness s.d.)', inputs: ['obj:tex'], channel: objPlane('obj:tex', 'Photo texture', '0–1', 0.005) },
+] as Omit<Variable, 'group'>[]).map(v => ({ ...v, group: 'Objects (segmentation only)' }));
+
+FUSION_VARIABLES.push(...PC_VARIABLES, ...ORTHO_VARIABLES, ...coniferVariables(), ...OBJECT_VARIABLES);
 
 export const variableById = new Map(FUSION_VARIABLES.map(v => [v.id, v]));
 

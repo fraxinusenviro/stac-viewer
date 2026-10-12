@@ -37,6 +37,7 @@ import { ANCHOR, itemName, shared, type Ctx } from './ctx.ts';
 import { variableOptions } from '../ui/variables.ts';
 import { ORTHO_SERVICES, orthoPhotoYear, orthoService } from '../xyz.ts';
 import { pcStatus } from '../pointcloud/pointCloud.ts';
+import { segmentPanel } from './segmentPanel.ts';
 import { fmtBytes, fmtCount } from '../dom.ts';
 
 const LAYER = 'fusion';
@@ -191,7 +192,7 @@ export function initFusion(ctx: Ctx) {
   /** Every variable these inputs can supply. */
   const availableVariables = () => {
     const it = items();
-    return FUSION_VARIABLES.filter(v => v.inputs.every(k => (k.startsWith('lidar:') ? !!it.lidar : k.startsWith('s2b:') ? !!it.s2b : k.startsWith('pc:') ? it.pointCloud : k.startsWith('ortho:') ? !!it.ortho : !!it.s2)));
+    return FUSION_VARIABLES.filter(v => v.inputs.every(k => (k.startsWith('obj:') ? false : k.startsWith('lidar:') ? !!it.lidar : k.startsWith('s2b:') ? !!it.s2b : k.startsWith('pc:') ? it.pointCloud : k.startsWith('ortho:') ? !!it.ortho : !!it.s2)));
   };
 
   async function valuesAt(lon: number, lat: number) {
@@ -311,6 +312,24 @@ export function initFusion(ctx: Ctx) {
     } }, 'Use as rules (conifer ≥ 0.25 · mixed · broadleaf ≤ −0.25)'));
     return wrap;
   }
+
+  // ── Segmentation ──────────────────────────────────────────────────────────
+
+  /** Inputs worth carrying onto every object: whatever the chosen sources can supply. */
+  const standardInputs = () => {
+    const it = items(), out: string[] = [];
+    if (it.lidar?.dsm) out.push('lidar:dsm', 'lidar:dtm');
+    if (it.s2) out.push('s2:nir', 's2:red', 's2:green', 's2:blue', 's2:swir16', 's2:rededge1', 's2:nir08');
+    if (it.s2b) out.push('s2b:nir', 's2b:red', 's2b:green', 's2b:swir16');
+    if (it.pointCloud) out.push('pc:ivg', 'pc:igr', 'pc:int', 'pc:pen', 'pc:att', 'pc:den');
+    if (it.ortho) out.push('ortho:r', 'ortho:g', 'ortho:b', 'ortho:tex');
+    return out;
+  };
+  const seg = segmentPanel({
+    ctx, panel: panelEl, beforeId: ANCHOR.fusion, isSampling: () => !!sampling,
+    classProduct: () => { try { return mode === 'strata' ? compileScheme(scheme) : mode === 'rules' ? compileRuleSet(rules) : null; } catch { return null; } },
+    sources: inputs => resolveInputs([...new Set([...inputs, ...standardInputs()])], items()),
+  });
 
   // ── Rendering ─────────────────────────────────────────────────────────────
 
@@ -486,6 +505,7 @@ export function initFusion(ctx: Ctx) {
       el.append(h('label', { class: 'row' }, 'Opacity', h('input', { type: 'range', min: '0', max: '1', step: '0.05', value: String(opacity), oninput: (e: Event) => { opacity = +(e.target as HTMLInputElement).value; if (map.getLayer(LAYER)) map.setPaintProperty(LAYER, 'raster-opacity', opacity); } })),
         h('button', { class: 'btn ghost small-btn', onclick: () => { hideLayer(map, LAYER); shown = false; panel = null; render(); } }, 'Remove from map'));
     }
+    el.append(seg.el(render));
     el.append(renderConiferIndex());
     el.append(renderSamples());
   }

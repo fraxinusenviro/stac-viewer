@@ -125,6 +125,27 @@ Orthophoto pixels are computed in the viewer's browser from the tiles the servic
 redistributed. Whether NSODB permits derived products beyond that has not been confirmed; the downloadable files are
 sold under a restricted licence. This is a proof of concept, not a production map.
 
+## Segment this view (object-based classification)
+
+"Segment this view" in the Fusion tab classifies **objects** instead of pixels (`src/segment/`):
+
+1. Every input is sampled over the view on one grid. The grid is linear in Web Mercator, so the result lies exactly on
+   the map, and its pixels are 2 m (coarser past ~1.2 M pixels; refused past 8 m, so zoom in to about level 15).
+2. **Superpixels** (SLIC) are drawn on canopy height and, when an orthophoto is chosen, its brightness and excess green,
+   after a 3 × 3 smoothing. The coarse imagery is deliberately left out, so it does not draw 10 m squares.
+3. Neighbouring superpixels are **merged** by Felzenszwalb–Huttenlocher's criterion: uniform ground joins into larger
+   patches and edges stay edges. The superpixel size, merge tolerance and compactness are sliders.
+4. Each object carries the **mean of every input** over its pixels (the majority for Sentinel scene classes), plus
+   measures that exist only for a region: area, compactness, canopy-height 90th percentile and spread, and photo
+   texture. These are offered as variables under *Objects (segmentation only)*; on the pixel map they have no value.
+5. The object is classified by the **same rules or strata** the pixel map uses, evaluated once per object. An index is
+   computed from the object's mean reflectance and a stratum from its mean canopy height.
+
+Tap an object for its values. **Download GeoJSON** writes every object as a polygon traced along the pixel edges, with its
+class and every variable that can be evaluated on it as attributes (about 55 with all sources on). On a 1.8 × 1.5 km view
+at zoom 16 this is ~3,000 objects in ~17 s, most of it reading the inputs. It is a proof of concept: objects are
+classified when segmented, so after editing rules, segment again.
+
 ## How it draws
 
 One engine (`src/engine.ts`) draws every product. A product (`src/products.ts`) names its inputs and computes each
