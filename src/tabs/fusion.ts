@@ -38,6 +38,7 @@ import { variableOptions } from '../ui/variables.ts';
 import { ORTHO_SERVICES, orthoPhotoYear, orthoService } from '../xyz.ts';
 import { pcStatus } from '../pointcloud/pointCloud.ts';
 import { segmentPanel } from './segmentPanel.ts';
+import { tablePanel } from './tablePanel.ts';
 import { fmtBytes, fmtCount } from '../dom.ts';
 
 const LAYER = 'fusion';
@@ -325,11 +326,13 @@ export function initFusion(ctx: Ctx) {
     if (it.ortho) out.push('ortho:r', 'ortho:g', 'ortho:b', 'ortho:tex');
     return out;
   };
-  const seg = segmentPanel({
+  const segHost = {
     ctx, panel: panelEl, beforeId: ANCHOR.fusion, isSampling: () => !!sampling,
     classProduct: () => { try { return mode === 'strata' ? compileScheme(scheme) : mode === 'rules' ? compileRuleSet(rules) : null; } catch { return null; } },
-    sources: inputs => resolveInputs([...new Set([...inputs, ...standardInputs()])], items()),
-  });
+    sources: (inputs: string[]) => resolveInputs([...new Set([...inputs, ...standardInputs()])], items()),
+  };
+  const seg = segmentPanel(segHost);
+  const tbl = tablePanel(segHost);
 
   // ── Rendering ─────────────────────────────────────────────────────────────
 
@@ -506,6 +509,7 @@ export function initFusion(ctx: Ctx) {
         h('button', { class: 'btn ghost small-btn', onclick: () => { hideLayer(map, LAYER); shown = false; panel = null; render(); } }, 'Remove from map'));
     }
     el.append(seg.el(render));
+    el.append(tbl.el(render));
     el.append(renderConiferIndex());
     el.append(renderSamples());
   }

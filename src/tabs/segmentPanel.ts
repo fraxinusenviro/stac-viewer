@@ -90,7 +90,7 @@ export function segmentPanel(host: SegmentHost) {
     rerender = onChange;
     const wrap = host.panel('segment', 'Segment this view (objects)', !!result);
     wrap.append(h('p', { class: 'muted small' }, 'Splits the view into objects on canopy height and the orthophoto (superpixels, then neighbours merged), averages every input over each object, adds object measures (area, compactness, canopy height P90 and spread, photo texture) and classifies each object with the rules or strata above. Objects replace speckle, and a 10 m Sentinel value is averaged over an object rather than claimed for a 2 m cell. From zoom ~15.'));
-    const slider = (label: string, key: keyof SegmentParams, min: number, max: number, step: number, show: (v: number) => string) => {
+    const slider = (label: string, key: 'sizeM' | 'merge' | 'compactness' | 'minTreeM', min: number, max: number, step: number, show: (v: number) => string) => {
       const out = h('output', {}, show(params[key]));
       return h('label', { class: 'row' }, `${label} `, h('input', {
         type: 'range', min: String(min), max: String(max), step: String(step), value: String(params[key]), class: 'grow', 'aria-label': label,
@@ -98,7 +98,14 @@ export function segmentPanel(host: SegmentHost) {
         onchange: () => saveParams(),
       }), out);
     };
+    const pick = (label: string, key: 'method' | 'heightStat', opts: [string, string][]) => h('label', { class: 'row' }, `${label} `,
+      h('select', { class: 'grow', 'aria-label': label, onchange: (e: Event) => { params = { ...params, [key]: (e.target as HTMLSelectElement).value }; saveParams(); onChange(); } },
+        ...opts.map(([v, t]) => h('option', { value: v, selected: params[key] === v }, t))));
     wrap.append(
+      pick('Objects', 'method', [['patches', 'Patches (superpixels merged)'], ['crowns', 'Tree crowns (canopy height model, zoom 17)']]),
+      pick('Object height', 'heightStat', [['mean', 'Mean canopy height'], ['p90', '90th percentile (the canopy, not its gaps)']]));
+    if (params.method === 'crowns') wrap.append(slider('Minimum tree height', 'minTreeM', 2, 10, 0.5, v => `${v} m`));
+    else wrap.append(
       slider('Superpixel size', 'sizeM', 4, 40, 1, v => `${v} m`),
       slider('Merge', 'merge', 0, 3, 0.1, v => (v ? v.toFixed(1) : 'off')),
       slider('Compactness', 'compactness', 0.2, 2, 0.1, v => v.toFixed(1)));

@@ -16,9 +16,16 @@ import { sampleGrid, type InputSource } from '../engine.ts';
 import { FUSION_VARIABLES, type Planes, type Product, type ProductStyle } from '../products.ts';
 import type { LonLatBox, OutGrid } from '../warp.ts';
 import { mergeRegions, slic } from './slic.ts';
+import { crowns, smooth3 } from './crowns.ts';
 import { classifyObjects, objectPlanes, ringsToPolygons, traceRings, type ObjectSet } from './objects.ts';
 
 export interface SegmentParams {
+  /** Patches (superpixels merged) or tree crowns (canopy height model). */
+  method: 'patches' | 'crowns';
+  /** The height an object's stratum and height rules read: its mean canopy height, or its 90th percentile. */
+  heightStat: 'mean' | 'p90';
+  /** Crowns: minimum tree height, m. */
+  minTreeM: number;
   /** Superpixel size, metres. */
   sizeM: number;
   /** Merge tolerance for a lone superpixel, in feature units (0: no merging). */
@@ -26,7 +33,7 @@ export interface SegmentParams {
   /** Space against features (SLIC compactness). */
   compactness: number;
 }
-export const DEFAULT_SEGMENT: SegmentParams = { sizeM: 12, merge: 0.6, compactness: 1.2 };
+export const DEFAULT_SEGMENT: SegmentParams = { method: 'patches', heightStat: 'mean', minTreeM: 3, sizeM: 12, merge: 0.6, compactness: 1.2 };
 
 export interface SegmentGrid extends OutGrid { box: LonLatBox; cellM: number }
 
@@ -47,10 +54,10 @@ const mercY = (lat: number) => R * Math.log(Math.tan(Math.PI / 4 + (lat * Math.P
 const latOf = (y: number) => (360 / Math.PI) * Math.atan(Math.exp(y / R)) - 90;
 
 /** A grid over a lon/lat box, linear in Web Mercator, with square cells of ~cellM on the ground. */
-export function mercatorGrid(box: LonLatBox): SegmentGrid {
+export function mercatorGrid(box: LonLatBox, minCellM = 2): SegmentGrid {
   const lat = (box[1] + box[3]) / 2, k = Math.cos((lat * Math.PI) / 180);
   const wM = ((box[2] - box[0]) * Math.PI / 180) * R * k, hM = (mercY(box[3]) - mercY(box[1])) * k;
-  const cellM = Math.max(2, Math.sqrt((wM * hM) / MAX_PX));
+  const cellM = Math.max(minCellM, Math.sqrt((wM * hM) / MAX_PX));
   const w = Math.max(8, Math.round(wM / cellM)), h = Math.max(8, Math.round(hM / cellM));
   const y0 = mercY(box[3]), y1 = mercY(box[1]);
   return { w, h, box, cellM, lonLat: (px, py) => [box[0] + (px / w) * (box[2] - box[0]), latOf(y0 + (py / h) * (y1 - y0))] };
@@ -101,23 +108,50 @@ function featuresOf(p: Planes, n: number): { list: Float32Array[]; names: string
 }
 
 export async function segmentView(box: LonLatBox, sources: Record<string, InputSource>, product: Product | null, style: ProductStyle | null, params: SegmentParams, stage: (msg: string) => void): Promise<SegmentResult> {
-  const grid = mercatorGrid(box);
+  const crownMode = params.method === 'crowns';
+  const grid = mercatorGrid(box, crownMode ? 1 : 2);
+  if (crownMode && grid.cellM > 1.5) throw new Error(`crowns need ~1 m pixels and this view would get ${grid.cellM.toFixed(1)} m — zoom in to about level 17`);
   if (grid.cellM > 8) throw new Error(`the view is too large to segment (it would need ${grid.cellM.toFixed(0)} m pixels) — zoom in to about level 15`);
   stage(`Reading every input over the view at ${grid.cellM.toFixed(1)} m (${grid.w} × ${grid.h} pixels)…`);
   const planes = await sampleGrid(sources, grid, product?.sharpen);
   const n = grid.w * grid.h;
-  const { list, names } = featuresOf(planes, n);
-  if (!list.length) throw new Error('nothing to segment on: needs the LiDAR (canopy height) or an orthophoto');
-  stage('Segmenting…');
+  let merged: { labels: Int32Array; count: number }, names: string[];
+  stage(crownMode ? 'Finding treetops and growing crowns…' : 'Segmenting…');
   await new Promise(r => setTimeout(r, 0));
-  const step = params.sizeM / grid.cellM;
-  // A 3 × 3 mean first: pixel-to-pixel photo noise otherwise makes ragged, stringy segments.
-  const smooth = list.map(f => boxMean(f, grid.w, grid.h));
-  const sp = slic(smooth, grid.w, grid.h, { step, compactness: params.compactness });
-  const merged = mergeRegions(sp.labels, sp.count, grid.w, grid.h, smooth, params.merge * step * step);
+  if (crownMode) {
+    if (!planes['lidar:dsm'] || !planes['lidar:dtm']) throw new Error('crowns need the LiDAR canopy height model');
+    const chm = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const d = planes['lidar:dsm'][i] - planes['lidar:dtm'][i]; chm[i] = d === d ? Math.max(0, d) : NaN; }
+    merged = crowns(smooth3(chm, grid.w, grid.h), grid.w, grid.h, { cellM: grid.cellM, minTreeM: params.minTreeM, seedFrac: 0.45 });
+    names = ['tree crowns from the canopy height model'];
+  } else {
+    const f = featuresOf(planes, n);
+    if (!f.list.length) throw new Error('nothing to segment on: needs the LiDAR (canopy height) or an orthophoto');
+    const step = params.sizeM / grid.cellM;
+    // A 3 × 3 mean first: pixel-to-pixel photo noise otherwise makes ragged, stringy segments.
+    const smooth = f.list.map(x => boxMean(x, grid.w, grid.h));
+    const sp = slic(smooth, grid.w, grid.h, { step, compactness: params.compactness });
+    merged = mergeRegions(sp.labels, sp.count, grid.w, grid.h, smooth, params.merge * step * step);
+    names = f.names;
+  }
   const objs = objectPlanes(merged.labels, merged.count, grid.w, grid.h, planes, grid.cellM);
+  if (params.heightStat === 'p90') useP90Height(objs);
   const classes = product?.classes && style ? classifyObjects(product, objs, style) : null;
   return { grid, labels: merged.labels, count: merged.count, objs, product, classes, features: names };
+}
+
+/**
+ * Make an object's canopy height its 90th percentile rather than its mean:
+ * the surface is raised so DSM − DTM reads P90 for every rule, stratum and
+ * attribute. A stand with gaps is then classed by its canopy, not by the
+ * average of canopy and gaps.
+ */
+export function useP90Height(objs: ObjectSet) {
+  const dsm = objs.planes['lidar:dsm'], dtm = objs.planes['lidar:dtm'], p90 = objs.planes['obj:chm_p90'];
+  if (!dsm || !dtm || !p90) return;
+  const out = dsm.slice();
+  for (let k = 0; k < out.length; k++) if (p90[k] === p90[k] && dtm[k] === dtm[k]) out[k] = dtm[k] + p90[k];
+  objs.planes['lidar:dsm'] = out;
 }
 
 /** The result as an RGBA image: class colours (or none) with the object boundaries drawn dark. */

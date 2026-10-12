@@ -79,3 +79,32 @@ test('trace: pixels touching only at a corner give two rings, not a crossing one
   assert.equal(polys.length, 2);
   for (const p of polys) assert.equal(ringArea2(p[0]), 2);
 });
+
+import { crowns, smooth3, treetops } from '../src/segment/crowns.ts';
+
+/** Two cone-shaped trees (12 m and 8 m) on flat ground, 1 m pixels. */
+function twoTrees() {
+  const w = 30, h = 16, chm = new Float32Array(w * h);
+  const cone = (cx: number, cy: number, top: number, r: number) => {
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const d = Math.hypot(x - cx, y - cy);
+      if (d < r) chm[y * w + x] = Math.max(chm[y * w + x], top * (1 - d / r));
+    }
+  };
+  cone(8, 8, 12, 6); cone(21, 8, 8, 5);
+  return { w, h, chm };
+}
+
+test('crowns: one treetop per tree, crowns grown to the low ground and no further', () => {
+  const { w, h, chm } = twoTrees();
+  const o = { cellM: 1, minTreeM: 3, seedFrac: 0.45 };
+  assert.deepEqual(treetops(chm, w, h, o), [8 * w + 8, 8 * w + 21]);
+  const r = crowns(chm, w, h, o);
+  assert.equal(r.count, 2);
+  assert.equal(r.labels[8 * w + 8], 0); assert.equal(r.labels[8 * w + 21], 1);
+  assert.equal(r.labels[0], -1, 'ground belongs to no crown');
+  // Every crown pixel is tall enough for its tree.
+  for (let i = 0; i < chm.length; i++) if (r.labels[i] >= 0) assert.ok(chm[i] >= 3 && chm[i] >= 0.45 * (r.labels[i] ? 8 : 12));
+  // Smoothing does not create or remove a top here.
+  assert.equal(treetops(smooth3(chm, w, h), w, h, o).length, 2);
+});

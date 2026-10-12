@@ -13,6 +13,7 @@
   "dependencies": {
     "copc": "^0.0.9",
     "geotiff": "^3.0.5",
+    "h3-js": "^4.2.1",
     "hyparquet": "^1.31.3",
     "laz-perf": "^0.0.7",
     "maplibre-gl": "^4.7.1",

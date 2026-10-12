@@ -141,10 +141,35 @@ sold under a restricted licence. This is a proof of concept, not a production ma
 5. The object is classified by the **same rules or strata** the pixel map uses, evaluated once per object. An index is
    computed from the object's mean reflectance and a stratum from its mean canopy height.
 
+**Tree crowns** (Objects → Tree crowns, zoom ~17, 1 m pixels) replace the patches with individual crowns: treetops are
+local maxima of the smoothed canopy height model within a window that widens with height, and crowns grow from them
+downhill, tallest first, while a pixel stays above the minimum tree height, above 0.45 × its treetop and within a
+height-dependent radius (Dalponte & Coomes 2016, as in lidR). What no crown reaches is left out. This finds dominant and
+co-dominant crowns, not understorey the top surface cannot see.
+
+**Object height** can be the object's mean canopy height or its **90th percentile**. The P90 is read by the strata and by
+every height rule, so a stand with gaps is classed by its canopy, not by the average of canopy and gaps.
+
 Tap an object for its values. **Download GeoJSON** writes every object as a polygon traced along the pixel edges, with its
 class and every variable that can be evaluated on it as attributes (about 55 with all sources on). On a 1.8 × 1.5 km view
 at zoom 16 this is ~3,000 objects in ~17 s, most of it reading the inputs. It is a proof of concept: objects are
 classified when segmented, so after editing rules, segment again.
+
+## Feature table (grid export)
+
+**Build for this view** produces one row per cell of **Sentinel-2's own pixel lattice** (10 or 20 m, in the scene's UTM
+CRS, aligned to its COG origin), so the imagery is never resampled; each cell is a Sentinel pixel. Every finer input (1 m
+LiDAR, point-cloud metrics, orthophoto) is sampled at 2 m and averaged into the cell. Each row also carries:
+
+- canopy-height P90 and spread, and photo texture;
+- the share of the cell in each class of the selected rules or strata;
+- `cell_id` (`epsg:size:col:row`), the centre in UTM and lon/lat, and coverage;
+- H3 ids at resolution 13 (~44 m², the cell centre) and 11 (~2 150 m², for roll-ups and joins).
+
+Any column can be previewed on the map, and a cell can be tapped. The download is **GeoParquet 1.1** (cell polygons in
+lon/lat as WKB; opens in DuckDB, QGIS, GDAL, pandas/GeoPandas) or CSV. A 1.5 × 1.2 km view at zoom 16 gives ~6,700 cells ×
+67 columns in ~16 s (2 MB of GeoParquet). Cells less than half inside the view are left out. h3-js and the parquet
+writer load only when the table is built or written.
 
 ## How it draws
 
